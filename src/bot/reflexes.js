@@ -155,29 +155,27 @@ export function startReflexes (bot, ctx, rec) {
     ctx.reflex = null
   }
 
-  async function nightCheck () {
-    if (ctx.reflex === 'fight' || ctx.reflex === 'flee' || ctx.reflex === 'leaving_shelter') return
-    // 避難中に水が入ってきたら、夜でもすぐ出る
-    if (shelterFrom && (bot.entity.isInWater || bot.oxygenLevel < 18)) {
+  // 夜にどう過ごすかは判断係が選ぶ（穴を掘る・家に帰る・寝る・そのまま働く）。ここでは穴にこもった後始末だけをする
+  async function shelterCheck () {
+    if (!shelterFrom || ctx.reflex === 'fight' || ctx.reflex === 'flee' || ctx.reflex === 'leaving_shelter') return
+    // 穴に水が入ってきたら、夜でもすぐ出る
+    if (bot.entity.isInWater || bot.oxygenLevel < 18) {
       rec.event('shelter_flooded', { oxygen: bot.oxygenLevel, at: pos(bot.entity.position) })
       await leaveShelter()
-      ctx.reflex = 'night_no_shelter'
       return
     }
-    if (isNight(bot) && !shelterFrom && ctx.reflex !== 'sheltering' && ctx.reflex !== 'night_no_shelter') {
-      ctx.reflex = 'sheltering'
-      await interruptActivity()
-      const ok = await shelter().catch((err) => {
-        rec.event('shelter_failed', { reason: err.message, at: pos(bot.entity.position) })
-        return false
-      })
-      // 掘れない場所なら、その夜は戦って耐える
-      ctx.reflex = ok ? 'shelter' : 'night_no_shelter'
-    } else if (!isNight(bot) && shelterFrom) {
-      await leaveShelter()
-    } else if (!isNight(bot) && ctx.reflex === 'night_no_shelter') {
-      ctx.reflex = null
-    }
+    if (!isNight(bot)) await leaveShelter()
+  }
+
+  // 判断係が「穴を掘ってこもる」を選んだときに呼ぶ。こもっている間（ctx.reflex = 'shelter'）は朝まで行動が止まる
+  ctx.digIn = async () => {
+    ctx.reflex = 'sheltering'
+    const ok = await shelter().catch((err) => {
+      rec.event('shelter_failed', { reason: err.message, at: pos(bot.entity.position) })
+      return false
+    })
+    ctx.reflex = ok ? 'shelter' : null
+    return ok
   }
 
   let busy = false
@@ -186,7 +184,7 @@ export function startReflexes (bot, ctx, rec) {
     busy = true
     try {
       await fightOrFlee()
-      await nightCheck()
+      await shelterCheck()
     } catch (err) {
       rec.event('reflex_error', { error: err.message })
     } finally {

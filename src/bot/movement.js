@@ -7,7 +7,14 @@ const NEEDS_PICKAXE = /pickaxe|incorrect_for_wooden_tool/
 
 let current = null
 
-export function updateMovements (bot) {
+// 自分で建てた建物（壁・屋根・扉）は、移動のために壊さない。家には扉から入る
+function insideStructure (town, p) {
+  return town.data.structures.some((st) => p.x >= st.origin.x && p.x < st.origin.x + st.size.x &&
+    p.y >= st.origin.y && p.y < st.origin.y + st.size.y &&
+    p.z >= st.origin.z && p.z < st.origin.z + st.size.z)
+}
+
+export function updateMovements (bot, town) {
   const hasPickaxe = bot.inventory.items().some((i) => i.name.endsWith('_pickaxe'))
   if (current === hasPickaxe) return
   current = hasPickaxe
@@ -25,6 +32,7 @@ export function updateMovements (bot) {
       if (NEEDS_PICKAXE.test(block.material ?? '')) movements.blocksCantBreak.add(block.id)
     }
   }
+  movements.exclusionAreasBreak.push((block) => (insideStructure(town, block.position) ? 100 : 0))
   bot.pathfinder.setMovements(movements)
 }
 

@@ -4,8 +4,9 @@ import pathfinderPkg from 'mineflayer-pathfinder'
 import { Vec3 } from 'vec3'
 import { countItem, countMatching, pos, sleep } from './util.js'
 import { updateMovements } from './movement.js'
-import { build, findBuildSite, houseBlueprint, materialsNeeded, prepareSite } from './build.js'
-import { foodCount, goHome, hunt, plantSaplings, storeItems } from './skills.js'
+import { BUILTIN_SPECS, SMALL_HOUSE, blueprintFor, build, findBuildSite, houseBlueprint, materialCount, materialsNeeded, normalizeSpec, pickMaterial, prepareSite, specToBlueprint } from './build.js'
+import { PLOT, earthwork, ensureCenter, nextPlotToLevel, nextRoad, readyPlots, roadBounds, townSummary } from './townplan.js'
+import { foodCount, goHome, houses as finishedHouses, hunt, makeBed, makeDoor, plantSaplings, sleepInBed, stayHome, storeItems } from './skills.js'
 
 const { goals } = pathfinderPkg
 
@@ -203,56 +204,192 @@ function bootstrapSteps (bot, ctx, rec) {
 }
 
 const BUILD_TIMEOUT_MS = 10 * 60 * 1000
+const PAVABLE = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'rooted_dirt'])
 
-async function buildHouse (bot, ctx, rec, town) {
-  const blueprint = houseBlueprint()
+// 長い作業は、反射が割り込んだときと、時間切れのとき（ctx.stepToken.cancelled）に途中でやめる。続きは次に選ばれたときに
+function stopper (ctx) {
+  const token = ctx.stepToken
+  return () => !!ctx.reflex || !!token?.cancelled
+}
+
+async function ensurePlanks (bot, rec, need) {
+  while (countMatching(bot, PLANKS_RE) < need && countMatching(bot, LOG_RE) > 0) {
+    if (!(await craftPlanks(bot, rec, need - countMatching(bot, PLANKS_RE)))) break
+  }
+}
+
+// 設計図に要る材料と、足りない分（原木は板材にもできる）
+function shortage (bot, need) {
+  const stone = materialCount(bot, 'cobblestone')
+  const planks = materialCount(bot, 'planks')
+  const logs = materialCount(bot, 'log')
+  const short = {}
+  if ((need.cobblestone ?? 0) > stone) short.cobblestone = need.cobblestone - stone
+  if ((need.log ?? 0) > logs) short.log = need.log - logs
+  const spareLogs = Math.max(0, logs - (need.log ?? 0))
+  if ((need.planks ?? 0) > planks + spareLogs * 4) short.planks = need.planks - planks - spareLogs * 4
+  return short
+}
+
+const KIND_JA = { cobblestone: '丸石', planks: '板材', log: '原木' }
+const describeNeed = (need) => Object.entries(need).map(([k, n]) => `${KIND_JA[k] ?? k} ${n}`).join('・')
+
+// 設計図どおりに建てる（新築・建てかけの続き・修理で共通）
+async function buildStructure (bot, ctx, rec, town, structure) {
+  const blueprint = blueprintFor(structure)
   const need = materialsNeeded(blueprint)
-  // 屋根の板材が足りなければ原木から作る
-  while (countMatching(bot, PLANKS_RE) < need.roof && countMatching(bot, LOG_RE) > 0) {
-    if (!(await craftPlanks(bot, rec, need.roof - countMatching(bot, PLANKS_RE)))) break
-  }
-
-  const stop = () => !!ctx.reflex && ctx.reflex !== 'night_no_shelter'
-  let structure = town.data.structures.find((s) => !s.done)
-  let site
-  if (!structure) {
-    const h = town.data.home
-    const center = h ? new Vec3(h.x, h.y, h.z) : bot.entity.position
-    site = findBuildSite(bot, town, blueprint, center)
-    if (!site) {
-      rec.event('build_site_not_found', { near: pos(center) })
-      await explore(bot, rec, 'build_site')
-      return false
-    }
-    structure = { type: blueprint.type, origin: pos(site.origin), size: blueprint.size, done: false, startedAt: new Date().toISOString() }
-    town.data.structures.push(structure)
-    town.save()
-    rec.event('build_start', { what: structure.type, origin: structure.origin, earthwork: site.cut.length + site.fill.length })
-  }
-
+  await ensurePlanks(bot, rec, need.planks ?? 0)
   const origin = new Vec3(structure.origin.x, structure.origin.y, structure.origin.z)
-  // 地面をならすのは、新しい場所を見つけた直後の1回だけ（建てかけを再開するときに、自分の壁を削らないように）
-  if (site && (site.cut.length || site.fill.length)) {
-    const fillItem = () => bot.inventory.items().find((i) => i.name === 'dirt') ?? bot.inventory.items().find((i) => i.name === 'cobblestone')
-    if (!(await prepareSite(bot, rec, site, fillItem, stop))) return false
-  }
-  const pick = (kind) => {
-    const items = bot.inventory.items()
-    if (kind === 'roof') return items.find((i) => PLANKS_RE.test(i.name)) ?? items.find((i) => i.name === 'cobblestone')
-    return items.find((i) => i.name === 'cobblestone') ?? items.find((i) => i.name === 'cobbled_deepslate')
-  }
-  const result = await build(bot, rec, origin, blueprint, pick, stop)
-  if (result.left === 0) {
+  const result = await build(bot, rec, origin, blueprint, (kind) => pickMaterial(bot, kind), stopper(ctx))
+  if (result.left === 0 && !structure.done) {
     structure.done = true
     structure.doneAt = new Date().toISOString()
-    // 最初の家の扉の前を「家」とする
+    if (structure.plot) town.data.plots[structure.plot] = { state: 'built', building: structure.type }
+    // 最初の建物の扉の前を「家」とする
     if (!town.data.home) town.data.home = { x: origin.x + blueprint.door.x, y: origin.y, z: origin.z + blueprint.door.z }
     town.save()
-    rec.event('build', { what: structure.type, origin: structure.origin, houses: town.data.structures.filter((s) => s.done).length })
+    rec.event('build', { what: structure.type, origin: structure.origin, buildings: town.data.structures.filter((s) => s.done).length })
   } else if (result.missing) {
-    rec.event('build_paused', { missing: result.missing, placed: result.placed, left: result.left })
+    rec.event('build_paused', { what: structure.type, missing: result.missing, placed: result.placed, left: result.left })
   }
   return result.placed > 0
+}
+
+// 街の中心ができる前の、最初の小さい家（近くの平らな場所を探して建てる）
+async function buildSmallHouse (bot, ctx, rec, town) {
+  const blueprint = houseBlueprint()
+  const h = town.data.home
+  const center = h ? new Vec3(h.x, h.y, h.z) : bot.entity.position
+  const site = findBuildSite(bot, town, blueprint, center)
+  if (!site) {
+    rec.event('build_site_not_found', { near: pos(center) })
+    await explore(bot, rec, 'build_site')
+    return false
+  }
+  const structure = { type: blueprint.type, spec: SMALL_HOUSE, origin: pos(site.origin), size: blueprint.size, done: false, startedAt: new Date().toISOString() }
+  town.data.structures.push(structure)
+  town.save()
+  rec.event('build_start', { what: structure.type, origin: structure.origin, earthwork: site.cut.length + site.fill.length })
+  if (site.cut.length || site.fill.length) {
+    const fillItem = () => bot.inventory.items().find((i) => i.name === 'dirt') ?? bot.inventory.items().find((i) => i.name === 'cobblestone')
+    if (!(await prepareSite(bot, rec, site, fillItem, stopper(ctx)))) return false
+  }
+  return buildStructure(bot, ctx, rec, town, structure)
+}
+
+// ならした区画に、設計図の建物を建てる（扉は区画の北側の道に向く）
+async function buildOnPlot (bot, ctx, rec, town, spec) {
+  const plot = readyPlots(town)[0]
+  if (!plot) return false
+  const bp = specToBlueprint(spec)
+  const origin = { x: plot.x0 + Math.floor((PLOT - bp.size.x) / 2), y: town.data.level + 1, z: plot.z0 + Math.floor((PLOT - bp.size.z) / 2) }
+  const structure = { type: spec.name, spec, origin, size: bp.size, plot: plot.id, done: false, startedAt: new Date().toISOString() }
+  town.data.structures.push(structure)
+  town.data.plots[plot.id] = { state: 'building', building: spec.name }
+  town.save()
+  rec.event('build_start', { what: spec.name, origin, plot: plot.id })
+  return buildStructure(bot, ctx, rec, town, structure)
+}
+
+// 削るものを上から削り、埋める場所を下から埋める
+async function doEarthwork (bot, rec, work, stop) {
+  const fillItem = () => bot.inventory.items().find((i) => i.name === 'dirt') ?? bot.inventory.items().find((i) => i.name === 'cobblestone')
+  const before = work.cut.length + work.fill.length
+  await prepareSite(bot, rec, work, fillItem, stop)
+  return before
+}
+
+async function levelPlot (bot, ctx, rec, town) {
+  const plot = nextPlotToLevel(bot, town)
+  if (!plot) { town.save(); return false }
+  town.data.plots[plot.id] = { state: 'leveling' }
+  town.save()
+  const work = earthwork(bot, town, plot)
+  if (!work) {
+    town.data.plots[plot.id] = { state: 'skipped', reason: 'unsuitable' }
+    town.save()
+    return false
+  }
+  if (work.cut.length || work.fill.length) await doEarthwork(bot, rec, work, stopper(ctx))
+  const left = earthwork(bot, town, plot)
+  const remaining = left ? left.cut.length + left.fill.length : null
+  if (remaining === 0) {
+    town.data.plots[plot.id] = { state: 'leveled' }
+    rec.event('plot_leveled', { plot: plot.id })
+  }
+  town.save()
+  rec.event('level', { plot: plot.id, before: work.cut.length + work.fill.length, remaining })
+  return true
+}
+
+async function ensureShovel (bot, rec) {
+  if (bot.inventory.items().some((i) => i.name.endsWith('_shovel'))) return true
+  return craft(bot, rec, materialCount(bot, 'cobblestone') >= 1 ? 'stone_shovel' : 'wooden_shovel', 1)
+}
+
+async function buildRoad (bot, ctx, rec, town) {
+  const key = nextRoad(town)
+  if (!key) return false
+  const b = roadBounds(town, key)
+  const work = earthwork(bot, town, b)
+  if (!work) {
+    town.data.roads[key] = { state: 'skipped' }
+    town.save()
+    return false
+  }
+  const stop = stopper(ctx)
+  if (work.cut.length || work.fill.length) await doEarthwork(bot, rec, work, stop)
+  if (stop()) return true
+  if (!(await ensureShovel(bot, rec))) return false
+
+  // 草や土をシャベルで「土の道」にする
+  let paved = 0
+  const level = town.data.level
+  for (let x = b.x0; x <= b.x1; x++) {
+    for (let z = b.z0; z <= b.z1; z++) {
+      if (stop()) return paved > 0
+      const top = bot.blockAt(new Vec3(x, level, z))
+      const above = bot.blockAt(new Vec3(x, level + 1, z))
+      if (!top || !PAVABLE.has(top.name) || above?.name !== 'air') continue
+      try {
+        await bot.pathfinder.goto(new goals.GoalLookAtBlock(top.position, bot.world, { reach: 4 }))
+        await bot.equip(bot.inventory.items().find((i) => i.name.endsWith('_shovel')), 'hand')
+        await bot.activateBlock(top)
+        paved++
+      } catch {}
+    }
+  }
+  const left = earthwork(bot, town, b)
+  if (left && left.cut.length + left.fill.length === 0) {
+    town.data.roads[key] = { state: 'done' }
+    rec.event('road', { key, paved })
+  }
+  town.save()
+  return paved > 0
+}
+
+// 完成した建物のうち、設計図と比べてブロックが欠けているもの（壁を壊された、など）
+function damagedBuildings (bot, town) {
+  return town.data.structures.filter((s) => s.done).map((s) => {
+    const missing = blueprintFor(s).blocks.filter((b) => {
+      const block = bot.blockAt(new Vec3(s.origin.x + b.x, s.origin.y + b.y, s.origin.z + b.z))
+      return block && block.boundingBox !== 'block'
+    }).length
+    return { structure: s, missing }
+  }).filter((d) => d.missing > 0)
+}
+
+// 建てられる設計図: 最初から入っているもの + 考える係が設計したもの
+export function designLibrary (ctx) {
+  const own = (ctx.memory?.designs ?? []).map(normalizeSpec)
+  return [...BUILTIN_SPECS.filter((s) => s !== SMALL_HOUSE), ...own]
+}
+
+// ベッドは同じ色の羊毛3つで作る。色ごとに数えて一番多い色の数
+function sameColorWool (bot) {
+  const byColor = {}
+  for (const i of bot.inventory.items()) if (i.name.endsWith('_wool')) byColor[i.name] = (byColor[i.name] ?? 0) + i.count
+  return Math.max(0, ...Object.values(byColor))
 }
 
 // 今選べる行動。label は判断係に見せる説明
@@ -263,30 +400,72 @@ function skillOptions (bot, ctx, rec, town, craftFn) {
   const saplings = countMatching(bot, /_sapling$/)
   const food = foodCount(bot)
   const stoneIds = [bot.registry.blocksByName.stone.id]
-  const need = materialsNeeded(houseBlueprint())
   const unfinished = town.data.structures.find((s) => !s.done)
-  const houses = town.data.structures.filter((s) => s.done).length
-  const canBuild = unfinished || (stone >= need.wall && planks + logs * 4 >= need.roof)
   const home = town.data.home
   const homeDist = home ? Math.round(bot.entity.position.distanceTo(new Vec3(home.x, home.y, home.z))) : null
   const slotsUsed = bot.inventory.items().length
+  const center = ensureCenter(town)
 
   const options = [
     { key: 'collect_logs', label: `木を切る（今: 原木 ${logs}本、板材 ${planks}枚）`, run: () => collect(bot, ctx, rec, logBlockIds(bot), 'log', 8) },
     { key: 'mine_stone', label: `石を掘る（今: 丸石 ${stone}個）`, run: () => collect(bot, ctx, rec, stoneIds, 'stone', 8) },
     { key: 'hunt', label: `動物を狩って食べ物を集める（今: 食べ物 ${food}個）`, run: async () => (await hunt(bot, rec)) ?? explore(bot, rec, 'animals') }
   ]
-  if (canBuild) {
-    options.push({
-      key: 'build_house',
-      label: unfinished ? '建てかけの家を仕上げる' : `家を建てる（${houses + 1}軒目。丸石 ${need.wall}個と板材 ${need.roof}枚を使う）`,
-      run: () => buildHouse(bot, ctx, rec, town),
-      timeout: BUILD_TIMEOUT_MS
-    })
+
+  if (unfinished) {
+    options.push({ key: 'finish_building', label: `建てかけの「${unfinished.type}」を仕上げる`, run: () => buildStructure(bot, ctx, rec, town, unfinished), timeout: BUILD_TIMEOUT_MS })
+  } else if (!center) {
+    const need = materialsNeeded(houseBlueprint())
+    if (Object.keys(shortage(bot, need)).length === 0) {
+      options.push({ key: 'build_house', label: `最初の家を建てる（${describeNeed(need)} を使う）`, run: () => buildSmallHouse(bot, ctx, rec, town), timeout: BUILD_TIMEOUT_MS })
+    }
   }
+
+  if (center) {
+    const plot = nextPlotToLevel(bot, town)
+    if (plot) options.push({ key: 'level_plot', label: `街の区画 ${plot.id} の地面をならす（建物を建てる準備。削った土は埋めるのに使う）`, run: () => levelPlot(bot, ctx, rec, town), timeout: BUILD_TIMEOUT_MS })
+    const road = nextRoad(town)
+    if (road) options.push({ key: 'build_road', label: '街の道を1区間のばす（長さ17・幅3。地面をならしてシャベルで土の道にする）', run: () => buildRoad(bot, ctx, rec, town), timeout: BUILD_TIMEOUT_MS })
+    if (!unfinished && readyPlots(town).length) {
+      for (const spec of designLibrary(ctx)) {
+        const need = materialsNeeded(specToBlueprint(spec))
+        if (Object.keys(shortage(bot, need)).length) continue
+        options.push({
+          key: `build:${spec.name}`,
+          label: `ならした区画に「${spec.name}」を建てる（${spec.width}×${spec.depth}、高さ${spec.height}。${describeNeed(need)} を使う）`,
+          run: () => buildOnPlot(bot, ctx, rec, town, spec),
+          timeout: BUILD_TIMEOUT_MS
+        })
+      }
+    }
+  }
+
   if (saplings > 0) options.push({ key: 'plant_saplings', label: `苗木を植えて木を増やす（苗木 ${saplings}本）`, run: () => plantSaplings(bot, rec, town) })
   if (home && slotsUsed >= 24) options.push({ key: 'store_items', label: `家のチェストに荷物をしまう（持ち物 ${slotsUsed}/36 枠）`, run: () => storeItems(bot, rec, town, craftFn) })
   if (home && homeDist > 32) options.push({ key: 'go_home', label: `家に戻る（${homeDist}ブロック先）`, run: () => goHome(bot, town) })
+  const t = bot.time.timeOfDay
+  const nightNear = t >= 11500 && t < 23500
+  const doneHouses = finishedHouses(town)
+  const wool = sameColorWool(bot)
+  if (nightNear) {
+    options.push({ key: 'dig_in', label: 'その場で穴を掘ってこもり、朝まで待つ', run: () => ctx.digIn() })
+    if (doneHouses.length) {
+      const doors = doneHouses.some((h) => h.door)
+      options.push({ key: 'stay_home', label: `家に帰って中で朝まで過ごす（家まで ${homeDist ?? '?'}ブロック、扉${doors ? 'あり' : 'なし'}）`, run: () => stayHome(bot, rec, town), timeout: BUILD_TIMEOUT_MS })
+    }
+    if (town.data.bed) options.push({ key: 'sleep', label: '家のベッドで寝て朝にする（復活地点も家になる）', run: () => sleepInBed(bot, rec, town), timeout: BUILD_TIMEOUT_MS })
+  }
+  const damaged = damagedBuildings(bot, town)
+  if (damaged.length && stone + planks > 0) {
+    const d = damaged[0]
+    options.push({ key: 'repair', label: `「${d.structure.type}」の壊れたところを直す（${d.missing}ブロック欠けている）`, run: () => buildStructure(bot, ctx, rec, town, d.structure), timeout: BUILD_TIMEOUT_MS })
+  }
+  if (doneHouses.some((h) => !h.door) && (planks >= 6 || logs >= 2)) {
+    options.push({ key: 'make_door', label: '扉を作って建物の入口につける（夜に敵が入ってこなくなる）', run: () => makeDoor(bot, rec, town, craftFn) })
+  }
+  if (doneHouses.length && !town.data.bed && wool >= 3) {
+    options.push({ key: 'make_bed', label: 'ベッドを作って家に置く（寝れば夜を飛ばせて、死んでも家で復活できる）', run: () => makeBed(bot, rec, town, craftFn) })
+  }
   options.push({ key: 'explore', label: '周りを探検して新しい場所を見つける', run: () => explore(bot, rec, 'curious') })
 
   // 2回続けて失敗した行動は、今回は出さない
@@ -294,7 +473,7 @@ function skillOptions (bot, ctx, rec, town, craftFn) {
   return options.filter((o) => !(last2.length === 2 && last2.every((h) => h.key === o.key && !h.ok)))
 }
 
-function describeSituation (bot, ctx, town) {
+export function describeSituation (bot, ctx, town) {
   const t = bot.time.timeOfDay
   const night = t >= 12500 && t < 23500
   const minutesToNight = Math.max(0, Math.round((12500 - t) / 20 / 60))
@@ -308,13 +487,25 @@ function describeSituation (bot, ctx, town) {
   lines.push(`持ち物: 原木 ${countMatching(bot, LOG_RE)}、板材 ${countMatching(bot, PLANKS_RE)}、丸石 ${inv.cobblestone ?? 0}、` +
     `土 ${inv.dirt ?? 0}、苗木 ${countMatching(bot, /_sapling$/)}、道具: ${tools.join('・') || 'なし'}（${bot.inventory.items().length}/36 枠）`)
 
-  const houses = town.data.structures.filter((s) => s.done).length
-  const unfinished = town.data.structures.some((s) => !s.done)
-  lines.push(`街: 家 ${houses}軒${unfinished ? '（建てかけ1軒あり）' : ''}、植えた苗木 ${town.data.saplingsPlanted}本、チェスト ${town.data.chest ? 'あり' : 'なし'}`)
-  if (houses === 0 && !unfinished) {
-    const need = materialsNeeded(houseBlueprint())
-    lines.push(`家を建てるには 丸石 ${need.wall}個・板材 ${need.roof}枚 が要る（原木1本 = 板材4枚）`)
+  const done = town.data.structures.filter((s) => s.done)
+  const unfinished = town.data.structures.find((s) => !s.done)
+  const kinds = {}
+  for (const s of done) kinds[s.type] = (kinds[s.type] ?? 0) + 1
+  lines.push(`街の建物: ${Object.entries(kinds).map(([k, n]) => `${k}×${n}`).join('、') || 'なし'}${unfinished ? `（建てかけ: ${unfinished.type}）` : ''}、植えた苗木 ${town.data.saplingsPlanted}本`)
+  const summary = townSummary(town)
+  if (summary) lines.push(summary)
+  // 次に建てたい建物の材料（足りない分）
+  if (town.data.center && !unfinished) {
+    const wants = designLibrary(ctx).map((spec) => ({ spec, short: shortage(bot, materialsNeeded(specToBlueprint(spec))) }))
+      .filter((w) => Object.keys(w.short).length).slice(0, 2)
+    for (const w of wants) lines.push(`「${w.spec.name}」を建てるには、あと ${describeNeed(w.short)} が要る`)
   }
+  const doors = done.filter((st) => st.door).length
+  const wool = sameColorWool(bot)
+  lines.push(`夜の備え: 扉のある建物 ${doors}/${done.length}、ベッド ${town.data.bed ? 'あり' : `なし（同じ色の羊毛 ${wool}/3 で作れる。羊を狩ると手に入る）`}`)
+  // 考える係が決めた方針と、学んだ教訓
+  if (ctx.memory?.focus) lines.push(`今の方針: ${ctx.memory.focus}`)
+  if (ctx.memory?.lessons?.length) lines.push(`教訓: ${ctx.memory.lessons.slice(-5).join(' / ')}`)
   if (ctx.lastDeath) {
     const ago = Math.round((Date.now() - ctx.lastDeath.at) / 60000)
     lines.push(`最近の死亡: ${ctx.lastDeath.cause ?? '不明'}（${ago}分前）`)
@@ -325,10 +516,16 @@ function describeSituation (bot, ctx, town) {
   return lines.join('\n')
 }
 
+// 考える係に見せる「体が今できること」
+export function listAbilities (bot, ctx, rec, town) {
+  return skillOptions(bot, ctx, rec, town, (name, count) => craft(bot, rec, name, count)).map((o) => o.label)
+}
+
 function fallbackChoice (options, bot) {
   const keys = options.map((o) => o.key)
   if (foodCount(bot) < 3 && keys.includes('hunt')) return 'hunt'
-  if (keys.includes('build_house')) return 'build_house'
+  const build = keys.find((k) => k === 'build_house' || k === 'finish_building' || k.startsWith('build:'))
+  if (build) return build
   return keys[0]
 }
 
@@ -339,13 +536,12 @@ export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
   let failures = 0
 
   while (bot.entity) {
-    // 夜に避難できなかったときは、戦闘の反射を生かしたまま作業を続ける
-    if ((ctx.reflex && ctx.reflex !== 'night_no_shelter') || ctx.paused) {
+    if (ctx.reflex || ctx.paused) {
       ctx.task = ctx.paused ? 'paused' : null
       await sleep(1000)
       continue
     }
-    updateMovements(bot)
+    updateMovements(bot, town)
 
     let step = bootstrap.find((s) => s.todo())
     let timeout = STEP_TIMEOUT_MS
@@ -357,7 +553,7 @@ export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
       try {
         const result = await decider.choose({ goal: goal(), situation, question: '次に何をする？', options })
         choice = result.choice
-        rec.event('decision', { choice, probs: result.probs, ms: result.ms, promptTokens: result.promptTokens })
+        rec.event('decision', { choice, probs: result.probs, ms: result.ms, promptTokens: result.promptTokens, situation, options: options.map((o) => o.label) })
       } catch (err) {
         choice = fallbackChoice(options, bot)
         rec.event('decision', { choice, fallback: true, error: err.message })
@@ -368,9 +564,13 @@ export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
     }
 
     ctx.task = step.name
+    // 時間切れになったら token.cancelled を立てて、長い作業（ならし・建築・道）に途中でやめさせる
+    const token = { cancelled: false }
+    ctx.stepToken = token
     let ok = false
     try {
       const result = await withTimeout(bot, step.run(), timeout)
+      if (result === 'timeout') token.cancelled = true
       if (result === 'timeout') rec.event('task_timeout', { task: step.name, at: pos(bot.entity.position) })
       ok = result !== false && result !== 'timeout'
     } catch (err) {

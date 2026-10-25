@@ -26,14 +26,19 @@ if [[ ! -f /etc/default/minecraft-ai-town ]]; then
   exit 1
 fi
 
+# llama-server はモデルの読み込みに時間がかかるので、ユニットか設定が変わったときだけ再起動する
+llm_before=$(cat /etc/systemd/system/minecraft-ai-llm.service /etc/default/minecraft-ai-town 2>/dev/null | sha256sum)
 install -m 644 systemd/minecraft-ai-bot.service systemd/minecraft-ai-llm.service /etc/systemd/system/
+llm_after=$(cat /etc/systemd/system/minecraft-ai-llm.service /etc/default/minecraft-ai-town 2>/dev/null | sha256sum)
 systemctl daemon-reload
 
 # 判断係: モデルが用意されていれば動かす（なければ bot は決め打ちの選び方で動く）
 . /etc/default/minecraft-ai-town
 if [[ -n "${LLM_MODEL:-}" && -f "$LLM_MODEL" && -x /opt/llm/llama.cpp/build/bin/llama-server ]]; then
   systemctl enable -q minecraft-ai-llm.service
-  systemctl restart minecraft-ai-llm.service
+  if [[ "$llm_before" != "$llm_after" ]] || ! systemctl is-active -q minecraft-ai-llm.service; then
+    systemctl restart minecraft-ai-llm.service
+  fi
 else
   echo "判断係のモデルがないので minecraft-ai-llm は起動しません（scripts/setup-llm.sh で用意できます）" >&2
 fi

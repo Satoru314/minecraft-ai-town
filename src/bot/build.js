@@ -11,27 +11,99 @@ const REPLACEABLE = new Set(['air', 'cave_air', 'short_grass', 'tall_grass', 'fe
   'pink_tulip', 'oxeye_daisy', 'cornflower', 'lily_of_the_valley', 'snow', 'sweet_berry_bush'])
 const BAD_GROUND = /leaves|log|water|lava|ice|sand|gravel|_planks|glass/
 
-// 5x5、壁の高さ3、正面（z=0 側）の真ん中に扉の穴、平らな屋根
-export function houseBlueprint () {
+// 設計図は「データ」（spec）で持ち、ブロックの並びはここで組み立てる。考える係が新しい spec を設計して足せるようにするため。
+// spec: { name, width, depth, height（壁の高さ）, wall, roof, pillar（四隅の柱。なければ null）, windows }
+// 材料の種類（kind）は cobblestone / planks / log のどれか
+export const MATERIALS = ['cobblestone', 'planks', 'log']
+export const SPEC_LIMITS = { width: [5, 11], depth: [5, 11], height: [3, 6] }
+
+export const SMALL_HOUSE = { name: '小さい家', width: 5, depth: 5, height: 3, wall: 'cobblestone', roof: 'planks', pillar: null, windows: false }
+export const BUILTIN_SPECS = [
+  SMALL_HOUSE,
+  { name: '大きい家', width: 7, depth: 7, height: 4, wall: 'cobblestone', roof: 'planks', pillar: 'log', windows: true },
+  { name: '倉庫', width: 9, depth: 7, height: 4, wall: 'planks', roof: 'planks', pillar: 'log', windows: false },
+  { name: '集会所', width: 11, depth: 9, height: 5, wall: 'cobblestone', roof: 'planks', pillar: 'log', windows: true }
+]
+
+const clamp = (v, [lo, hi]) => Math.max(lo, Math.min(hi, Math.round(Number(v) || lo)))
+
+// 考える係が書いた spec を、建てられる範囲に収める
+export function normalizeSpec (spec) {
+  const pickMat = (m, fallback) => (MATERIALS.includes(m) ? m : fallback)
+  return {
+    name: String(spec.name || '建物').slice(0, 20),
+    width: clamp(spec.width, SPEC_LIMITS.width),
+    depth: clamp(spec.depth, SPEC_LIMITS.depth),
+    height: clamp(spec.height, SPEC_LIMITS.height),
+    wall: pickMat(spec.wall, 'cobblestone'),
+    roof: pickMat(spec.roof, 'planks'),
+    pillar: spec.pillar ? pickMat(spec.pillar, 'log') : null,
+    windows: !!spec.windows
+  }
+}
+
+// 正面（z=0 側）の真ん中に扉の穴（高さ2）、平らな屋根。窓は高さ2段目に、角を除いて1つおき
+export function specToBlueprint (spec) {
+  const { width: w, depth: d, height: h } = spec
+  const doorX = Math.floor(w / 2)
   const blocks = []
-  for (let y = 0; y < 3; y++) {
-    for (let x = 0; x < 5; x++) {
-      for (let z = 0; z < 5; z++) {
-        const edge = x === 0 || x === 4 || z === 0 || z === 4
-        if (!edge) continue
-        if (x === 2 && z === 0 && y < 2) continue
-        blocks.push({ x, y, z, kind: 'wall' })
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      for (let z = 0; z < d; z++) {
+        const edgeX = x === 0 || x === w - 1
+        const edgeZ = z === 0 || z === d - 1
+        if (!edgeX && !edgeZ) continue
+        if (x === doorX && z === 0 && y < 2) continue
+        const corner = edgeX && edgeZ
+        if (corner && spec.pillar) { blocks.push({ x, y, z, kind: spec.pillar }); continue }
+        if (spec.windows && y === 1 && !corner && (edgeX ? z : x) % 2 === 0 && !(x === doorX && z === 0)) continue
+        blocks.push({ x, y, z, kind: spec.wall })
       }
     }
   }
-  for (let x = 0; x < 5; x++) for (let z = 0; z < 5; z++) blocks.push({ x, y: 3, z, kind: 'roof' })
-  return { type: 'house', size: { x: 5, y: 4, z: 5 }, door: { x: 2, z: -1 }, blocks }
+  for (let x = 0; x < w; x++) for (let z = 0; z < d; z++) blocks.push({ x, y: h, z, kind: spec.roof })
+  return {
+    type: spec.name,
+    spec,
+    size: { x: w, y: h + 1, z: d },
+    doorAt: { x: doorX, z: 0 },
+    door: { x: doorX, z: -1 },
+    interior: { x: doorX, z: Math.floor(d / 2) },
+    blocks
+  }
+}
+
+// 古い記録（type: 'house'、spec なし）は小さい家として扱う
+export function blueprintFor (structure) {
+  return specToBlueprint(structure.spec ?? SMALL_HOUSE)
+}
+
+export function houseBlueprint () {
+  return specToBlueprint(SMALL_HOUSE)
 }
 
 export function materialsNeeded (blueprint) {
   const need = {}
   for (const b of blueprint.blocks) need[b.kind] = (need[b.kind] ?? 0) + 1
   return need
+}
+
+// 材料の種類に合う持ち物を1つ選ぶ（古い kind 名 wall / roof も受け付ける）
+export function pickMaterial (bot, kind) {
+  const items = bot.inventory.items()
+  const k = kind === 'wall' ? 'cobblestone' : kind === 'roof' ? 'planks' : kind
+  if (k === 'cobblestone') return items.find((i) => i.name === 'cobblestone') ?? items.find((i) => i.name === 'cobbled_deepslate')
+  if (k === 'planks') return items.find((i) => i.name.endsWith('_planks'))
+  if (k === 'log') return items.find((i) => /_(log|stem)$/.test(i.name) && !i.name.startsWith('stripped_'))
+  return null
+}
+
+export function materialCount (bot, kind) {
+  const items = bot.inventory.items()
+  const match = kind === 'cobblestone'
+    ? (i) => i.name === 'cobblestone' || i.name === 'cobbled_deepslate'
+    : kind === 'planks' ? (i) => i.name.endsWith('_planks') : (i) => /_(log|stem)$/.test(i.name) && !i.name.startsWith('stripped_')
+  return items.filter(match).reduce((n, i) => n + i.count, 0)
 }
 
 // その列でいちばん高い固いブロック（葉は除く）= 地表。地下にいても地表を基準に探せるようにする

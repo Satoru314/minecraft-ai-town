@@ -3,10 +3,11 @@ Description=Minecraft AI town decider (llama-server)
 After=network-online.target
 
 [Service]
+# 2本並行（判断係と考える係）。文脈は1本あたり 8192 トークン
 User=mcai
 Group=mcai
 EnvironmentFile=/etc/default/minecraft-ai-town
-ExecStart=/opt/llm/llama.cpp/build/bin/llama-server -m ${LLM_MODEL} --host 127.0.0.1 --port ${LLM_PORT} -t ${LLM_THREADS} -c 4096 --cache-reuse 256
+ExecStart=/opt/llm/llama.cpp/build/bin/llama-server -m ${LLM_MODEL} --host 127.0.0.1 --port ${LLM_PORT} -t ${LLM_THREADS} -c 16384 -np 2 --cache-reuse 256
 Restart=always
 RestartSec=10
 # bot やマイクラより後回しでよい

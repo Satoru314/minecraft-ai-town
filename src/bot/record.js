@@ -20,6 +20,31 @@ export function createRecorder (dataDir) {
       fs.renameSync(tmp, statePath)
     },
 
+    // 指定時刻より後の出来事（ファイルの末尾 512KB だけ読む）
+    readSince (iso) {
+      let text
+      try {
+        const fd = fs.openSync(eventsPath, 'r')
+        const size = fs.fstatSync(fd).size
+        const len = Math.min(size, 512 * 1024)
+        const buf = Buffer.alloc(len)
+        fs.readSync(fd, buf, 0, len, size - len)
+        fs.closeSync(fd)
+        text = buf.toString('utf8')
+      } catch {
+        return []
+      }
+      const out = []
+      for (const line of text.split('\n')) {
+        if (!line.startsWith('{')) continue
+        try {
+          const e = JSON.parse(line)
+          if (e.t > iso) out.push(e)
+        } catch {}
+      }
+      return out
+    },
+
     readState () {
       try {
         return JSON.parse(fs.readFileSync(statePath, 'utf8'))

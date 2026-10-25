@@ -12,7 +12,9 @@ import { createRecorder } from './record.js'
 import { createDecider } from '../decider/client.js'
 import { loadTown } from './town.js'
 import { startReflexes } from './reflexes.js'
-import { runActivity } from './activity.js'
+import { describeSituation, listAbilities, runActivity } from './activity.js'
+import { loadMemory } from '../thinker/memory.js'
+import { createThinker } from '../thinker/thinker.js'
 import { installRubberbandGuard, installStuckRecovery, installSwimming, updateMovements } from './movement.js'
 import { inventorySummary, isNight, pos } from './util.js'
 
@@ -24,7 +26,9 @@ const config = {
   version: process.env.MC_VERSION ?? '1.21.4',
   username: process.env.BOT_NAME ?? 'ai_builder_01',
   dataDir: process.env.DATA_DIR ?? './data',
-  llmUrl: process.env.LLM_URL ?? 'http://127.0.0.1:8081'
+  llmUrl: process.env.LLM_URL ?? 'http://127.0.0.1:8081',
+  // 考える係だけ別の（大きい）モデルにしたいとき。llama-server 互換の /completion を持つ URL
+  thinkerUrl: process.env.THINKER_URL || process.env.LLM_URL || 'http://127.0.0.1:8081'
 }
 if (!config.host) {
   console.error('MC_HOST is not set')
@@ -33,10 +37,11 @@ if (!config.host) {
 
 const rec = createRecorder(config.dataDir)
 const town = loadTown(config.dataDir)
+const memory = loadMemory(config.dataDir)
 const decider = createDecider({ url: config.llmUrl })
 
 // 目標は data/plan.json の goal（夜の戦略役が書き換える予定）。なければ既定の方針
-const DEFAULT_GOAL = '住みやすい街を作る。まず安全な家と食べ物を確保し、少しずつ建物と木を増やしていく。死なないことも大事。'
+const DEFAULT_GOAL = '大きな街をつくる。土地をならし、道を通し、大きな建物をたくさん建てる。そのために石と木を大量に集め、食べ物と安全な寝床を確保し、死なないようにする。'
 function goal () {
   try {
     return JSON.parse(fs.readFileSync(path.join(config.dataDir, 'plan.json'), 'utf8')).goal || DEFAULT_GOAL
@@ -46,11 +51,20 @@ function goal () {
 }
 const saved = rec.readState()
 const ctx = {
-  reflex: null, // fight / flee / sheltering / shelter / leaving_shelter / night_no_shelter
+  reflex: null, // fight / flee / sheltering / shelter / leaving_shelter
   task: null,
   paused: false,
   deaths: saved.deaths ?? 0,
-  aliveSince: saved.aliveSince ?? new Date().toISOString()
+  aliveSince: saved.aliveSince ?? new Date().toISOString(),
+  memory: memory.data
+}
+
+// 考える係。死んだ・何かを建てた、のあとは少し待ってから振り返らせる
+let thinker = null
+const recordEvent = rec.event
+rec.event = (type, detail) => {
+  recordEvent(type, detail)
+  if (type === 'death' || type === 'build') thinker?.thinkSoon(type === 'death' ? '死んだ' : '建てた')
 }
 
 const bot = mineflayer.createBot({
@@ -69,7 +83,7 @@ bot.loadPlugin(autoEat)
 bot.once('spawn', async () => {
   // spawn 直後は周りのチャンクが届いていないので、待ってから動き出す
   await bot.waitForChunksToLoad()
-  updateMovements(bot)
+  updateMovements(bot, town)
   installStuckRecovery(bot, rec)
   installSwimming(bot)
   installRubberbandGuard(bot, rec)
@@ -78,6 +92,17 @@ bot.once('spawn', async () => {
   rec.event('connected', { at: pos(bot.entity.position), version: bot.version })
   startReflexes(bot, ctx, rec)
   runActivity(bot, ctx, rec, { decider, town, goal }).catch((err) => rec.event('activity_crashed', { error: err.message }))
+  thinker = createThinker({
+    bot,
+    ctx,
+    rec,
+    memory,
+    llmUrl: config.thinkerUrl,
+    goal,
+    situation: () => describeSituation(bot, ctx, town),
+    abilities: () => listAbilities(bot, ctx, rec, town)
+  })
+  thinker.start()
   setInterval(writeState, 5000)
 })
 
@@ -117,6 +142,9 @@ bot.on('chat', (username, message) => {
   } else if (/^(状況|status)$/i.test(text)) {
     bot.chat(`HP ${Math.round(bot.health)} / 満腹度 ${bot.food} / 今: ${ctx.reflex ?? ctx.task ?? '待機'} / 死亡 ${ctx.deaths}回`)
   } else {
+    // 決まったお願い以外は、考える係に届けて返事を考えさせる
+    rec.event('heard', { from: username, text })
+    thinker?.hear(username, text)
     return
   }
   rec.event('chat_command', { from: username, text })

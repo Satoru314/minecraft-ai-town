@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""判断係（Qwen）の判断を新しい順に表示する。
+
+  bin/decisions [件数]      直近 N 件（既定 5）を、見た状況・選択肢・確率つきで
+  bin/decisions -f          新しい判断が出るたびに表示し続ける（Ctrl-C で終了）
+"""
+import json
+import os
+import sys
+import time
+
+data = os.environ.get("DATA_DIR", "/var/lib/minecraft-ai-town")
+path = f"{data}/events.jsonl"
+
+
+def show(e):
+    t = e["t"][11:19]
+    if e.get("fallback"):
+        print(f"\n=== {t}  → {e['choice']}（判断係に聞けず、予備のルールで選んだ: {e.get('error')}）")
+        return
+    print(f"\n=== {t}  → {e['choice']}   ({e.get('ms', '?')}ms, {e.get('promptTokens', '?')} tokens)")
+    if e.get("situation"):
+        for line in e["situation"].splitlines():
+            print(f"  | {line}")
+    probs = e.get("probs", {})
+    labels = e.get("options") or list(probs)
+    for key, label in zip(probs, labels):
+        p = probs[key]
+        bar = "#" * round(p * 30)
+        mark = "▶" if key == e["choice"] else " "
+        print(f"  {mark} {p:5.1%} {bar:<30} {label}")
+
+
+def decisions(lines):
+    for line in lines:
+        if '"decision"' in line:
+            e = json.loads(line)
+            if e["type"] == "decision":
+                yield e
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "-f":
+    with open(path) as f:
+        f.seek(0, 2)
+        try:
+            while True:
+                line = f.readline()
+                if not line:
+                    time.sleep(1)
+                    continue
+                for e in decisions([line]):
+                    show(e)
+                    sys.stdout.flush()
+        except KeyboardInterrupt:
+            pass
+else:
+    n = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+    with open(path) as f:
+        for e in list(decisions(f))[-n:]:
+            show(e)
