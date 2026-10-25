@@ -39,7 +39,9 @@ if (!config.host) {
 const rec = createRecorder(config.dataDir)
 const town = loadTown(config.dataDir)
 const memory = loadMemory(config.dataDir)
-const decider = createDecider({ url: config.llmUrl })
+// LLM_URL=off で LLM を使わない（判断はルール、考える係は動かさない）
+const llmOff = config.llmUrl === 'off'
+const decider = llmOff ? null : createDecider({ url: config.llmUrl })
 
 // 目標は data/plan.json の goal（夜の戦略役が書き換える予定）。なければ既定の方針
 const DEFAULT_GOAL = '大きな街をつくる。土地をならし、道を通し、大きな建物をたくさん建てる。そのために石と木を大量に集め、食べ物と安全な寝床を確保し、死なないようにする。'
@@ -93,7 +95,7 @@ bot.once('spawn', async () => {
   rec.event('connected', { at: pos(bot.entity.position), version: bot.version })
   startReflexes(bot, ctx, rec)
   runActivity(bot, ctx, rec, { decider, town, goal }).catch((err) => rec.event('activity_crashed', { error: err.message }))
-  thinker = createThinker({
+  if (!llmOff) thinker = createThinker({
     bot,
     ctx,
     rec,
@@ -105,7 +107,7 @@ bot.once('spawn', async () => {
     designs: () => designLibrary(ctx),
     normalizeSpec
   })
-  thinker.start()
+  thinker?.start()
   setInterval(writeState, 5000)
 })
 

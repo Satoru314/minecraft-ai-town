@@ -567,12 +567,39 @@ export function listAbilities (bot, ctx, rec, town) {
   return skillOptions(bot, ctx, rec, town, (name, count) => craft(bot, rec, name, count)).map((o) => o.label)
 }
 
-function fallbackChoice (options, bot) {
+// LLM を使わないとき（または応答がないとき）の判断。優先順位で選ぶ。
+// 直近2回続けて失敗した行動は一度飛ばす。
+function ruleChoice (options, bot, ctx, town) {
   const keys = options.map((o) => o.key)
-  if (foodCount(bot) < 3 && keys.includes('hunt')) return 'hunt'
-  const build = keys.find((k) => k === 'build_house' || k === 'finish_building' || k.startsWith('build:'))
-  if (build) return build
-  return keys[0]
+  const recent = ctx.history.slice(-2)
+  const failing = (k) => recent.length === 2 && recent.every((h) => h.key === k && !h.ok)
+  const has = (k) => keys.includes(k) && !failing(k)
+  const pick = (...ks) => ks.find(has)
+
+  // 夜: 寝る > 家にこもる > 穴にこもる
+  const night = pick('sleep', 'stay_home', 'dig_in')
+  if (night) return night
+  if (foodCount(bot) < 3 && has('hunt')) return 'hunt'
+  const care = pick('repair', 'finish_building', 'build_house', 'make_door', 'make_bed', 'store_items')
+  if (care) return care
+  // 建てられる建物があれば建てる（同じものばかりにならないよう、ランダム）
+  const builds = keys.filter((k) => k.startsWith('build:') && !failing(k))
+  if (builds.length) return builds[Math.floor(Math.random() * builds.length)]
+
+  // 街づくり: ならした区画がなければならす。道はときどき
+  const hasReady = readyPlots(town).length > 0
+  const lastTown = ctx.history.slice(-6).filter((h) => h.key === 'level_plot' || h.key === 'build_road').length
+  if (!hasReady && has('level_plot') && lastTown < 3) return 'level_plot'
+  if (has('build_road') && lastTown === 0 && Math.random() < 0.5) return 'build_road'
+
+  // 材料集め: 次に建てたい建物に足りない方を集める
+  if (has('plant_saplings') && Math.random() < 0.1) return 'plant_saplings'
+  const want = designLibrary(ctx).map((spec) => shortage(bot, materialsNeeded(specToBlueprint(spec))))
+    .find((s) => Object.keys(s).length)
+  if (want?.cobblestone && has('mine_stone')) return 'mine_stone'
+  if ((want?.log || want?.planks) && has('collect_logs')) return 'collect_logs'
+  const gather = pick(Math.random() < 0.5 ? 'mine_stone' : 'collect_logs', 'mine_stone', 'collect_logs', 'hunt', 'explore')
+  return gather ?? keys[0]
 }
 
 export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
@@ -597,12 +624,15 @@ export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
       const options = skillOptions(bot, ctx, rec, town, craftFn)
       const situation = describeSituation(bot, ctx, town)
       let choice
-      try {
+      if (!decider) {
+        choice = ruleChoice(options, bot, ctx, town)
+        rec.event('decision', { choice, by: 'rules' })
+      } else try {
         const result = await decider.choose({ goal: goal(), situation, question: '次に何をする？', options })
         choice = result.choice
         rec.event('decision', { choice, probs: result.probs, ms: result.ms, promptTokens: result.promptTokens, situation, options: options.map((o) => o.label) })
       } catch (err) {
-        choice = fallbackChoice(options, bot)
+        choice = ruleChoice(options, bot, ctx, town)
         rec.event('decision', { choice, fallback: true, error: err.message })
       }
       const option = options.find((o) => o.key === choice)

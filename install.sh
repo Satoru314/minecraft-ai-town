@@ -32,9 +32,11 @@ install -m 644 systemd/minecraft-ai-bot.service systemd/minecraft-ai-llm.service
 llm_after=$(cat /etc/systemd/system/minecraft-ai-llm.service /etc/default/minecraft-ai-town 2>/dev/null | sha256sum)
 systemctl daemon-reload
 
-# 判断係: モデルが用意されていれば動かす（なければ bot は決め打ちの選び方で動く）
+# 判断係: モデルが用意されていれば動かす（なければ bot は決め打ちの選び方で動く）。LLM_URL=off なら止める
 . /etc/default/minecraft-ai-town
-if [[ -n "${LLM_MODEL:-}" && -f "$LLM_MODEL" && -x /opt/llm/llama.cpp/build/bin/llama-server ]]; then
+if [[ "${LLM_URL:-}" == off ]]; then
+  systemctl disable -q --now minecraft-ai-llm.service 2>/dev/null || true
+elif [[ -n "${LLM_MODEL:-}" && -f "$LLM_MODEL" && -x /opt/llm/llama.cpp/build/bin/llama-server ]]; then
   systemctl enable -q minecraft-ai-llm.service
   if [[ "$llm_before" != "$llm_after" ]] || ! systemctl is-active -q minecraft-ai-llm.service; then
     systemctl restart minecraft-ai-llm.service
