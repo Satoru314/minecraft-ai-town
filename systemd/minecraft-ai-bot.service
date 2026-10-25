@@ -1,0 +1,18 @@
+[Unit]
+Description=Minecraft AI town bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mcai
+Group=mcai
+WorkingDirectory=/opt/minecraft-ai-town
+EnvironmentFile=/etc/default/minecraft-ai-town
+ExecStart=/usr/bin/node src/bot/index.js
+# 切断・クラッシュしたら少し待って再接続
+Restart=always
+RestartSec=15
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+#!/bin/bash
+# bot の現在の状態と、最近の出来事を表示する。
+#   bin/status [件数]
+set -euo pipefail
+data="${DATA_DIR:-/var/lib/minecraft-ai-town}"
+n="${1:-15}"
+python3 - "$data" "$n" <<'PY'
+import json, sys, collections
+data, n = sys.argv[1], int(sys.argv[2])
+try:
+    s = json.load(open(f"{data}/state.json"))
+except FileNotFoundError:
+    sys.exit("state.json がまだありません")
+print(f"{s['name']}  更新 {s['updatedAt']}")
+print(f"  位置 {s['position']}  HP {s['health']}  満腹度 {s['food']}  {'夜' if s['night'] else '昼'}")
+print(f"  今: {s['reflex'] or s['task'] or '待機'}{' (一時停止中)' if s['paused'] else ''}  死亡 {s['deaths']}回  生存開始 {s['aliveSince']}")
+inv = sorted(s['inventory'].items(), key=lambda kv: -kv[1])
+print("  持ち物:", ", ".join(f"{k}×{v}" for k, v in inv) or "なし")
+if s.get("players"):
+    print("  近くのプレイヤー:", ", ".join(s["players"]))
+try:
+    lines = open(f"{data}/events.jsonl").read().splitlines()
+except FileNotFoundError:
+    lines = []
+counts = collections.Counter(json.loads(l)["type"] for l in lines)
+print("\n累計:", ", ".join(f"{k} {v}" for k, v in counts.most_common()))
+print(f"\n最近の出来事（{n}件）:")
+for l in lines[-n:]:
+    e = json.loads(l)
+    t = e.pop("t")[11:19]
+    typ = e.pop("type")
+    print(f"  {t} {typ:<14} {json.dumps(e, ensure_ascii=False)}")
+PY

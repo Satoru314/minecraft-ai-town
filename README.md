@@ -3,7 +3,18 @@
 ローカルで動く AI が Minecraft のサバイバルワールドで暮らし、敵と戦いながら、ひたすら街を発展させ続けるシステム。
 クラウドの AI API は使わず、すべて手元の CPU だけで動かす。
 
-> **状態: 設計中。** まだ動くコードはない。仕様は [docs/design.md](docs/design.md)、進め方は [docs/roadmap.md](docs/roadmap.md)。
+> **状態: 段階1（bot が接続して生き延びる）の途中。** 判断モデルはまだつないでいない。仕様は [docs/design.md](docs/design.md)、進め方は [docs/roadmap.md](docs/roadmap.md)。
+
+## 動かし方（bot）
+
+Node.js 22 以上のマシン（Debian 13 で確認）に送り込む:
+
+```sh
+bin/deploy root@<bot用マシン>      # 初回は /etc/default/minecraft-ai-town ができるので MC_HOST を書き換えて再実行
+ssh root@<bot用マシン> /opt/minecraft-ai-town/bin/status   # 状態と最近の出来事
+```
+
+今の bot ができること: 接続・再接続、戦闘と逃走、自動で食事と防具、夜は穴を掘って避難、木→作業台→木のツルハシ→石の道具の決め打ちの手順、チャットのお願い（`来て` `止まって` `再開` `状況`）。
 
 ## しくみ（概要）
 

@@ -1,0 +1,10 @@
+#!/bin/bash
+# 手元のリポジトリを bot 用のマシンに送って install.sh を実行する。
+#   bin/deploy root@<host>
+set -euo pipefail
+target=${1:?usage: bin/deploy root@<host>}
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+
+ssh "$target" 'command -v rsync >/dev/null || (DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync >/dev/null)'
+rsync -a --delete --exclude .git --exclude node_modules --exclude data "$repo/" "$target:/opt/minecraft-ai-town/"
+ssh "$target" /opt/minecraft-ai-town/install.sh
