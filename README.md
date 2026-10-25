@@ -3,7 +3,7 @@
 ローカルで動く AI が Minecraft のサバイバルワールドで暮らし、敵と戦いながら、ひたすら街を発展させ続けるシステム。
 クラウドの AI API は使わず、すべて手元の CPU だけで動かす。
 
-> **状態: 段階2（判断で動く）の途中。** 石の道具がそろったら、ローカルの Qwen3.5-4B が次の行動を選ぶ。仕様は [docs/design.md](docs/design.md)、進め方は [docs/roadmap.md](docs/roadmap.md)。
+> **状態: 大きな街づくりの途中。** ローカルの Qwen3.5-4B が、素早く次の行動を選ぶ「判断係」と、数分おきに振り返って方針・教訓・建物の設計を考え、チャットでつぶやく「考える係」の2役をこなす。仕様は [docs/design.md](docs/design.md)、進め方は [docs/roadmap.md](docs/roadmap.md)。
 
 ## 動かし方（bot）
 
@@ -12,6 +12,8 @@ Node.js 22 以上のマシン（Debian 13 で確認）に送り込む:
 ```sh
 bin/deploy root@<bot用マシン>      # 初回は /etc/default/minecraft-ai-town ができるので MC_HOST を書き換えて再実行
 ssh root@<bot用マシン> /opt/minecraft-ai-town/bin/status   # 状態・街・最後の判断・最近の出来事
+ssh root@<bot用マシン> /opt/minecraft-ai-town/bin/decisions -f   # 判断係の判断（見た状況・選択肢・確率）を流し続ける
+ssh root@<bot用マシン> cat /var/lib/minecraft-ai-town/memory/diary/$(date +%F).md   # 考える係の日記
 ```
 
 判断係（Qwen3.5-4B）も動かす場合は、先に bot 用マシンで `scripts/setup-llm.sh` を実行する（llama.cpp のビルドとモデルのダウンロード。数分かかる）。

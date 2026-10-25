@@ -180,10 +180,29 @@ export function findBuildSite (bot, town, blueprint, center, radius = 24, maxWor
 export async function prepareSite (bot, rec, site, pickFill, shouldStop) {
   let cut = 0
   let filled = 0
-  for (const p of [...site.cut].sort((a, b) => b.y - a.y)) {
+  // 自分の足元（立っている列の下）を掘ると、落ちる途中の位置がサーバーと食い違って引き戻され続ける。
+  // その列は後回しにし、周りを削るうちに離れてから掘る
+  const queue = [...site.cut].sort((a, b) => b.y - a.y)
+  const deferred = new Map()
+  while (queue.length) {
+    const p = queue.shift()
     if (shouldStop()) return false
     const b = bot.blockAt(p)
     if (!b || REPLACEABLE.has(b.name)) continue
+    const feet = bot.entity.position.floored()
+    if (p.x === feet.x && p.z === feet.z && p.y < feet.y) {
+      const key = p.toString()
+      const n = deferred.get(key) ?? 0
+      if (n < 3) {
+        deferred.set(key, n + 1)
+        queue.push(p)
+        if (queue.length === 1) {
+          // 残りがこれだけなら、横にずれてから掘る
+          await bot.pathfinder.goto(new goals.GoalInvert(new goals.GoalNearXZ(p.x, p.z, 1))).catch(() => {})
+        }
+        continue
+      }
+    }
     try {
       await bot.pathfinder.goto(new goals.GoalLookAtBlock(p, bot.world, { reach: 4 }))
       if (bot.tool) await bot.tool.equipForBlock(b, {})

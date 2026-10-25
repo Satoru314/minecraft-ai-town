@@ -12,7 +12,8 @@ import { createRecorder } from './record.js'
 import { createDecider } from '../decider/client.js'
 import { loadTown } from './town.js'
 import { startReflexes } from './reflexes.js'
-import { describeSituation, listAbilities, runActivity } from './activity.js'
+import { describeSituation, designLibrary, listAbilities, runActivity } from './activity.js'
+import { normalizeSpec } from './build.js'
 import { loadMemory } from '../thinker/memory.js'
 import { createThinker } from '../thinker/thinker.js'
 import { installRubberbandGuard, installStuckRecovery, installSwimming, updateMovements } from './movement.js'
@@ -100,7 +101,9 @@ bot.once('spawn', async () => {
     llmUrl: config.thinkerUrl,
     goal,
     situation: () => describeSituation(bot, ctx, town),
-    abilities: () => listAbilities(bot, ctx, rec, town)
+    abilities: () => listAbilities(bot, ctx, rec, town),
+    designs: () => designLibrary(ctx),
+    normalizeSpec
   })
   thinker.start()
   setInterval(writeState, 5000)

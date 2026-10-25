@@ -2,13 +2,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-const LIMITS = { lessons: 20, facts: 20, wishes: 10 }
+const LIMITS = { lessons: 20, facts: 20, wishes: 10, designs: 8 }
 
 export function loadMemory (dataDir) {
   const dir = path.join(dataDir, 'memory')
   fs.mkdirSync(path.join(dir, 'diary'), { recursive: true })
   const file = path.join(dir, 'memory.json')
-  const data = { focus: '', lessons: [], facts: [], wishes: [], thoughts: 0, updatedAt: null }
+  const data = { focus: '', lessons: [], facts: [], wishes: [], designs: [], thoughts: 0, updatedAt: null }
   try {
     Object.assign(data, JSON.parse(fs.readFileSync(file, 'utf8')))
   } catch {}
@@ -35,10 +35,17 @@ export function loadMemory (dataDir) {
     data[kind] = data[kind].filter((_, i) => !drop.has(i))
   }
 
+  // 自分で設計した建物。同じ名前なら上書き、上限を超えたら古いものから消す
+  function addDesign (spec) {
+    data.designs = data.designs.filter((d) => d.name !== spec.name)
+    data.designs.push(spec)
+    while (data.designs.length > LIMITS.designs) data.designs.shift()
+  }
+
   function appendDiary (text) {
     const day = new Date().toISOString().slice(0, 10)
     fs.appendFileSync(path.join(dir, 'diary', `${day}.md`), text + '\n')
   }
 
-  return { data, save, add, remove, appendDiary }
+  return { data, save, add, remove, addDesign, appendDiary }
 }
