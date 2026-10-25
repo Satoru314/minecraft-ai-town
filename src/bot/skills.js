@@ -253,7 +253,7 @@ export async function stayHome (bot, rec, town) {
   if (!house) return false
   const inside = spots(house).inside
   await bot.pathfinder.goto(new goals.GoalBlock(inside.x, inside.y, inside.z))
-  rec.event('stay_home', { house: house.origin, type: house.type, door: !!house.door })
+  rec.event('stay_home', { house: house.origin, building: house.type, door: !!house.door })
   // 夕方（夜の少し前）に入っても、朝になるまで待つ
   const evening = () => { const t = bot.time.timeOfDay; return t >= 11500 && t < 23500 }
   while (evening() && bot.entity) await sleep(2000)

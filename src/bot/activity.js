@@ -3,7 +3,9 @@
 import pathfinderPkg from 'mineflayer-pathfinder'
 import { Vec3 } from 'vec3'
 import { countItem, countMatching, pos, sleep } from './util.js'
-import { updateMovements } from './movement.js'
+import { insideStructure, updateMovements } from './movement.js'
+import { fellTree, isTreeBase } from './trees.js'
+import { craftOnce } from './crafting.js'
 import { BUILTIN_SPECS, SMALL_HOUSE, blueprintFor, build, findBuildSite, houseBlueprint, materialCount, materialsNeeded, normalizeSpec, pickMaterial, prepareSite, specToBlueprint } from './build.js'
 import { PLOT, earthwork, ensureCenter, nextPlotToLevel, nextRoad, readyPlots, roadBounds, townSummary } from './townplan.js'
 import { foodCount, goHome, houses as finishedHouses, hunt, makeBed, makeDoor, plantSaplings, sleepInBed, stayHome, storeItems } from './skills.js'
@@ -39,21 +41,10 @@ async function withTimeout (bot, promise, ms) {
   }
 }
 
-// 丸太が地面から何ブロック上にあるか（下に続く丸太をたどって数える）
-function heightAboveGround (bot, p) {
-  let h = 0
-  let below = bot.blockAt(p.offset(0, -1, 0))
-  while (below && LOG_RE.test(below.name) && h < 30) {
-    h++
-    below = bot.blockAt(p.offset(0, -1 - h, 0))
-  }
-  return below?.boundingBox === 'block' ? h : Infinity
-}
-
-// 足場なしで手が届くものだけ狙う（木の上のほうの丸太、深すぎる石は無視）
+// 狙うもの: 木は根元の丸太（丸ごと切り倒す）、石は足場なしで届く深さのもの
 function reachableFilter (bot, label) {
   const y = bot.entity.position.y
-  if (label === 'log') return (p) => heightAboveGround(bot, p) <= 3
+  if (label === 'log') return (p) => isTreeBase(bot, p) && !(bot.__town && insideStructure(bot.__town, p))
   return (p) => p.y <= y + 3 && p.y >= y - 8
 }
 
@@ -105,6 +96,16 @@ async function collect (bot, ctx, rec, blockIds, label, want) {
     }
     found = findReachable(bot, blockIds, label, 16)
     if (found.length === 0) return false
+  }
+
+  // 木は根元から丸ごと切り倒す（上のほうの丸太を宙に残さない）
+  if (label === 'log') {
+    const before = countMatching(bot, LOG_RE)
+    const isProtected = (p) => !!bot.__town && insideStructure(bot.__town, p)
+    await fellTree(bot, rec, found[0], { stop: () => !!ctx.reflex || !!ctx.stepToken?.cancelled, isProtected })
+    const gained = countMatching(bot, LOG_RE) - before
+    if (gained > 0) rec.event('mine', { block: label, gained, at: pos(bot.entity.position) })
+    return gained > 0
   }
 
   const targets = found.slice(0, Math.min(want, 4)).map((p) => bot.blockAt(p)).filter(Boolean)
@@ -159,16 +160,13 @@ async function craft (bot, rec, name, count) {
   }
   if (!recipe) return false
 
-  // 1.21.4 では複数回分をまとめて作ると、余った材料がクラフト欄に置き去りになって消える。
-  // 1回分ずつ作り、持ち物のクラフト欄（2x2）を使ったときは毎回「画面を閉じる」を送って材料を持ち物に戻させる。
+  // 1回分ずつ、自前のクラフト（crafting.js）で作る。bot.craft は 1.21.4 で材料を消したり失敗したりする
   const before = countItem(bot, name)
   const times = Math.ceil(count / recipe.result.count)
   for (let i = 0; i < times; i++) {
     const r = bot.recipesFor(item.id, null, 1, table)[0]
     if (!r) break
-    await bot.craft(r, 1, table)
-    if (!table) bot._client.write('close_window', { windowId: 0 })
-    await bot.waitForTicks(4)
+    await craftOnce(bot, r, table)
   }
   const made = countItem(bot, name) - before
   if (made > 0) rec.event('craft', { item: name, count: made })
@@ -310,7 +308,21 @@ async function levelPlot (bot, ctx, rec, town) {
     town.save()
     return false
   }
-  if (work.cut.length || work.fill.length) await doEarthwork(bot, rec, work, stopper(ctx))
+  // 区画の中の木は、先に根元から丸ごと切り倒す（上のほうを残さない）
+  const stop = stopper(ctx)
+  const bases = new Map()
+  for (const p of work.cut) {
+    if (!LOG_RE.test(bot.blockAt(p)?.name ?? '')) continue
+    let b = p
+    while (LOG_RE.test(bot.blockAt(b.offset(0, -1, 0))?.name ?? '')) b = b.offset(0, -1, 0)
+    bases.set(b.toString(), b)
+  }
+  for (const base of bases.values()) {
+    if (stop()) return true
+    await fellTree(bot, rec, base, { stop, isProtected: (p) => insideStructure(town, p) })
+  }
+  const work2 = bases.size ? (earthwork(bot, town, plot) ?? work) : work
+  if (work2.cut.length || work2.fill.length) await doEarthwork(bot, rec, work2, stop)
   const left = earthwork(bot, town, plot)
   const remaining = left ? left.cut.length + left.fill.length : null
   if (remaining === 0) {
@@ -533,6 +545,7 @@ export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
   const bootstrap = bootstrapSteps(bot, ctx, rec)
   const craftFn = (name, count) => craft(bot, rec, name, count)
   ctx.history = ctx.history ?? []
+  bot.__town = town
   let failures = 0
 
   while (bot.entity) {
