@@ -1,0 +1,16 @@
+[Unit]
+Description=Minecraft AI town decider (llama-server)
+After=network-online.target
+
+[Service]
+User=mcai
+Group=mcai
+EnvironmentFile=/etc/default/minecraft-ai-town
+ExecStart=/opt/llm/llama.cpp/build/bin/llama-server -m ${LLM_MODEL} --host 127.0.0.1 --port ${LLM_PORT} -t ${LLM_THREADS} -c 4096 --cache-reuse 256
+Restart=always
+RestartSec=10
+# bot やマイクラより後回しでよい
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

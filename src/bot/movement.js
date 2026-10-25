@@ -17,6 +17,9 @@ export function updateMovements (bot) {
   movements.canOpenDoors = true
   // 泳いで渡るのは苦手なので、陸で回り込めるならそちらを選ばせる
   movements.liquidCost = 20
+  // ブロックを置く移動（土を積んで真上に登る・橋を架ける）は高めにして、掘れる場所なら階段状に掘って登り降りさせる。
+  // 禁止はしないので、掘れるものがない場面では今までどおり積んで登れる（石を1つ掘ると約3、1段の階段で3〜6）
+  movements.placeCost = 6
   if (!hasPickaxe) {
     for (const block of bot.registry.blocksArray) {
       if (NEEDS_PICKAXE.test(block.material ?? '')) movements.blocksCantBreak.add(block.id)

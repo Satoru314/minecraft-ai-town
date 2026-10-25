@@ -26,8 +26,18 @@ if [[ ! -f /etc/default/minecraft-ai-town ]]; then
   exit 1
 fi
 
-install -m 644 systemd/minecraft-ai-bot.service /etc/systemd/system/
+install -m 644 systemd/minecraft-ai-bot.service systemd/minecraft-ai-llm.service /etc/systemd/system/
 systemctl daemon-reload
+
+# 判断係: モデルが用意されていれば動かす（なければ bot は決め打ちの選び方で動く）
+. /etc/default/minecraft-ai-town
+if [[ -n "${LLM_MODEL:-}" && -f "$LLM_MODEL" && -x /opt/llm/llama.cpp/build/bin/llama-server ]]; then
+  systemctl enable -q minecraft-ai-llm.service
+  systemctl restart minecraft-ai-llm.service
+else
+  echo "判断係のモデルがないので minecraft-ai-llm は起動しません（scripts/setup-llm.sh で用意できます）" >&2
+fi
+
 systemctl enable -q minecraft-ai-bot.service
 systemctl restart minecraft-ai-bot.service
 echo "started. logs: journalctl -u minecraft-ai-bot -f / status: bin/status"

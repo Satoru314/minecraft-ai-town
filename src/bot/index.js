@@ -6,7 +6,11 @@ import pvpPkg from 'mineflayer-pvp'
 import armorManager from 'mineflayer-armor-manager'
 import collectBlockPkg from 'mineflayer-collectblock'
 import { loader as autoEat } from 'mineflayer-auto-eat'
+import fs from 'node:fs'
+import path from 'node:path'
 import { createRecorder } from './record.js'
+import { createDecider } from '../decider/client.js'
+import { loadTown } from './town.js'
 import { startReflexes } from './reflexes.js'
 import { runActivity } from './activity.js'
 import { installRubberbandGuard, installStuckRecovery, installSwimming, updateMovements } from './movement.js'
@@ -19,7 +23,8 @@ const config = {
   port: Number(process.env.MC_PORT ?? 25565),
   version: process.env.MC_VERSION ?? '1.21.4',
   username: process.env.BOT_NAME ?? 'ai_builder_01',
-  dataDir: process.env.DATA_DIR ?? './data'
+  dataDir: process.env.DATA_DIR ?? './data',
+  llmUrl: process.env.LLM_URL ?? 'http://127.0.0.1:8081'
 }
 if (!config.host) {
   console.error('MC_HOST is not set')
@@ -27,6 +32,18 @@ if (!config.host) {
 }
 
 const rec = createRecorder(config.dataDir)
+const town = loadTown(config.dataDir)
+const decider = createDecider({ url: config.llmUrl })
+
+// 目標は data/plan.json の goal（夜の戦略役が書き換える予定）。なければ既定の方針
+const DEFAULT_GOAL = '住みやすい街を作る。まず安全な家と食べ物を確保し、少しずつ建物と木を増やしていく。死なないことも大事。'
+function goal () {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(config.dataDir, 'plan.json'), 'utf8')).goal || DEFAULT_GOAL
+  } catch {
+    return DEFAULT_GOAL
+  }
+}
 const saved = rec.readState()
 const ctx = {
   reflex: null, // fight / flee / sheltering / shelter / leaving_shelter / night_no_shelter
@@ -60,7 +77,7 @@ bot.once('spawn', async () => {
 
   rec.event('connected', { at: pos(bot.entity.position), version: bot.version })
   startReflexes(bot, ctx, rec)
-  runActivity(bot, ctx, rec).catch((err) => rec.event('activity_crashed', { error: err.message }))
+  runActivity(bot, ctx, rec, { decider, town, goal }).catch((err) => rec.event('activity_crashed', { error: err.message }))
   setInterval(writeState, 5000)
 })
 
@@ -71,6 +88,7 @@ bot.on('messagestr', (message, position) => {
 })
 bot.on('death', () => {
   ctx.deaths++
+  ctx.lastDeath = { cause: lastDeathMessage?.replace(bot.username + ' ', ''), at: Date.now() }
   const lived = (Date.now() - new Date(ctx.aliveSince).getTime()) / 60000
   rec.event('death', { cause: lastDeathMessage, at: pos(bot.entity.position), livedMinutes: Math.round(lived) })
   ctx.aliveSince = new Date().toISOString()
@@ -121,7 +139,14 @@ function writeState () {
     deaths: ctx.deaths,
     aliveSince: ctx.aliveSince,
     inventory: inventorySummary(bot),
-    players: Object.keys(bot.players).filter((n) => n !== bot.username)
+    players: Object.keys(bot.players).filter((n) => n !== bot.username),
+    town: {
+      home: town.data.home,
+      houses: town.data.structures.filter((st) => st.done).length,
+      building: town.data.structures.some((st) => !st.done),
+      saplingsPlanted: town.data.saplingsPlanted,
+      chest: town.data.chest
+    }
   })
 }
 

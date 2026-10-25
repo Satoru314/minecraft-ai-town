@@ -16,6 +16,14 @@ print(f"  位置 {s['position']}  HP {s['health']}  満腹度 {s['food']}  {'夜
 print(f"  今: {s['reflex'] or s['task'] or '待機'}{' (一時停止中)' if s['paused'] else ''}  死亡 {s['deaths']}回  生存開始 {s['aliveSince']}")
 inv = sorted(s['inventory'].items(), key=lambda kv: -kv[1])
 print("  持ち物:", ", ".join(f"{k}×{v}" for k, v in inv) or "なし")
+t = s.get("town")
+if t:
+    print(f"  街: 家 {t['houses']}軒{'（建築中）' if t['building'] else ''}  家の位置 {t['home']}  苗木 {t['saplingsPlanted']}本  チェスト {t['chest'] or 'なし'}")
+decisions = [json.loads(l) for l in open(f"{data}/events.jsonl") if '"decision"' in l][-1:] if __import__("os").path.exists(f"{data}/events.jsonl") else []
+if decisions:
+    d = decisions[0]
+    probs = ", ".join(f"{k} {v:.0%}" for k, v in sorted(d.get("probs", {}).items(), key=lambda kv: -kv[1])[:4])
+    print(f"  最後の判断: {d['choice']}{'（予備の選び方）' if d.get('fallback') else ''}  [{probs}]  {d.get('ms', '?')}ms")
 if s.get("players"):
     print("  近くのプレイヤー:", ", ".join(s["players"]))
 try:

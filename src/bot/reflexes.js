@@ -7,6 +7,9 @@ const { goals } = pathfinderPkg
 
 const FIGHT_RANGE = 10
 const FLEE_HEALTH = 7
+// 弓を持つ敵からは、背中を向けて逃げると撃たれ続ける。かなり危なくなるまで詰め寄って倒す
+const RANGED = new Set(['skeleton', 'stray', 'bogged', 'pillager'])
+const FLEE_HEALTH_RANGED = 4
 const IGNORE = new Set(['enderman', 'zombified_piglin', 'piglin'])
 const WEAPONS = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword',
   'netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'golden_axe', 'wooden_axe']
@@ -62,7 +65,8 @@ export function startReflexes (bot, ctx, rec) {
     // 避難中は穴の中にいるので、すぐそばまで来たときだけ戦う
     if (shelterFrom && threat.position.distanceTo(bot.entity.position) > 3) return
 
-    const tooWeak = bot.health <= FLEE_HEALTH || (threat.name === 'creeper' && !hasWeapon(bot))
+    const fleeAt = RANGED.has(threat.name) ? FLEE_HEALTH_RANGED : FLEE_HEALTH
+    const tooWeak = bot.health <= fleeAt || (threat.name === 'creeper' && !hasWeapon(bot))
     if (tooWeak) {
       if (ctx.reflex !== 'flee') {
         ctx.reflex = 'flee'
@@ -111,7 +115,8 @@ export function startReflexes (bot, ctx, rec) {
         rec.event('shelter_failed', { reason: `${side} next to the shaft`, at: pos(start) })
         return false
       }
-      // 素手で石を掘るような、時間のかかる穴掘りはしない（土・砂・砂利は素手でも1秒前後）
+      // 持っている中で一番合う道具に持ち替えてから、時間がかかりすぎないか見る（素手で石、など）
+      if (bot.tool) await bot.tool.equipForBlock(below, {}).catch(() => {})
       if (bot.digTime(below) > 5000) {
         rec.event('shelter_failed', { reason: `too slow to dig ${below.name} (${Math.round(bot.digTime(below))}ms, onGround=${bot.entity.onGround})`, at: pos(start) })
         return false
