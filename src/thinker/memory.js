@@ -22,7 +22,8 @@ export function loadMemory (dataDir) {
   // 同じ内容は重ねず、上限を超えたら古いものから忘れる
   function add (kind, items) {
     for (const raw of items ?? []) {
-      const text = String(raw).trim()
+      // 「4. 〜」のように番号を付けて書いてくることがあるので外す
+      const text = String(raw).trim().replace(/^\d+\s*[.．、)）]\s*/, '')
       if (!text || data[kind].includes(text)) continue
       data[kind].push(text)
     }

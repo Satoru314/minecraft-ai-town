@@ -300,7 +300,8 @@ async function doEarthwork (bot, rec, work, stop) {
 async function levelPlot (bot, ctx, rec, town) {
   const plot = nextPlotToLevel(bot, town)
   if (!plot) { town.save(); return false }
-  town.data.plots[plot.id] = { state: 'leveling' }
+  // 進まなかった回数（stuck）は残す
+  town.data.plots[plot.id] = { ...(town.data.plots[plot.id] ?? {}), state: 'leveling' }
   town.save()
   const work = earthwork(bot, town, plot)
   if (!work) {
@@ -324,13 +325,31 @@ async function levelPlot (bot, ctx, rec, town) {
   const work2 = bases.size ? (earthwork(bot, town, plot) ?? work) : work
   if (work2.cut.length || work2.fill.length) await doEarthwork(bot, rec, work2, stop)
   const left = earthwork(bot, town, plot)
+  const before = work.cut.length + work.fill.length
   const remaining = left ? left.cut.length + left.fill.length : null
+  const sample = left ? [...left.cut.slice(0, 3).map((p) => `削る ${bot.blockAt(p)?.name}@${p}`), ...left.fill.slice(0, 3).map((p) => `埋める @${p}`)] : []
+  rec.event('level', { plot: plot.id, before, remaining, sample })
   if (remaining === 0) {
     town.data.plots[plot.id] = { state: 'leveled' }
     rec.event('plot_leveled', { plot: plot.id })
+    town.save()
+    return true
   }
+  // 進まなかった（届かない・置けない作業が残っている）。3回続いたら、残りが少なければ良しとし、多ければ飛ばす
+  if (remaining === null || remaining >= before) {
+    const stuck = (town.data.plots[plot.id]?.stuck ?? 0) + 1
+    if (stuck >= 3) {
+      const good = remaining !== null && remaining <= 20
+      town.data.plots[plot.id] = good ? { state: 'leveled', leftover: remaining } : { state: 'skipped', reason: 'stuck' }
+      rec.event(good ? 'plot_leveled' : 'plot_skipped', { plot: plot.id, leftover: remaining })
+    } else {
+      town.data.plots[plot.id] = { state: 'leveling', stuck }
+    }
+    town.save()
+    return false
+  }
+  town.data.plots[plot.id] = { state: 'leveling' }
   town.save()
-  rec.event('level', { plot: plot.id, before: work.cut.length + work.fill.length, remaining })
   return true
 }
 
@@ -465,7 +484,9 @@ function skillOptions (bot, ctx, rec, town, craftFn) {
       const doors = doneHouses.some((h) => h.door)
       options.push({ key: 'stay_home', label: `家に帰って中で朝まで過ごす（家まで ${homeDist ?? '?'}ブロック、扉${doors ? 'あり' : 'なし'}）`, run: () => stayHome(bot, rec, town), timeout: BUILD_TIMEOUT_MS })
     }
-    if (town.data.bed) options.push({ key: 'sleep', label: '家のベッドで寝て朝にする（復活地点も家になる）', run: () => sleepInBed(bot, rec, town), timeout: BUILD_TIMEOUT_MS })
+    // ベッドで寝られるのは夜（12542 以降）か雷雨のときだけ
+    const canSleep = (t >= 12542 && t < 23460) || bot.thunderState > 0
+    if (town.data.bed && canSleep) options.push({ key: 'sleep', label: '家のベッドで寝て朝にする（復活地点も家になる）', run: () => sleepInBed(bot, rec, town), timeout: BUILD_TIMEOUT_MS })
   }
   const damaged = damagedBuildings(bot, town)
   if (damaged.length && stone + planks > 0) {
@@ -478,11 +499,22 @@ function skillOptions (bot, ctx, rec, town, craftFn) {
   if (doneHouses.length && !town.data.bed && wool >= 3) {
     options.push({ key: 'make_bed', label: 'ベッドを作って家に置く（寝れば夜を飛ばせて、死んでも家で復活できる）', run: () => makeBed(bot, rec, town, craftFn) })
   }
-  options.push({ key: 'explore', label: '周りを探検して新しい場所を見つける', run: () => explore(bot, rec, 'curious') })
+  options.push({ key: 'explore', label: '周りを探検する（近くに木・石・動物・建てる場所が見つからないときだけ）', run: () => explore(bot, rec, 'curious') })
 
   // 2回続けて失敗した行動は、今回は出さない
   const last2 = ctx.history.slice(-2)
   return options.filter((o) => !(last2.length === 2 && last2.every((h) => h.key === o.key && !h.ok)))
+}
+
+// 大きな街に近づくために、今いちばん効く一歩
+function nextTownStep (town, unfinished) {
+  if (unfinished) return `建てかけの「${unfinished.type}」を仕上げる`
+  if (!town.data.center) return 'まず最初の家を建てる（家の前が街の中心になる）'
+  const plots = Object.entries(town.data.plots ?? {})
+  const leveling = plots.find(([, p]) => p.state === 'leveling')
+  if (plots.some(([, p]) => p.state === 'leveled')) return 'ならした区画が空いているので、材料を集めて大きな建物を建てる'
+  if (leveling) return `区画 ${leveling[0]} のならしを終わらせる（終われば大きな建物を建てられる）`
+  return '空いている区画をならして、建物を建てる場所を作る'
 }
 
 export function describeSituation (bot, ctx, town) {
@@ -506,6 +538,7 @@ export function describeSituation (bot, ctx, town) {
   lines.push(`街の建物: ${Object.entries(kinds).map(([k, n]) => `${k}×${n}`).join('、') || 'なし'}${unfinished ? `（建てかけ: ${unfinished.type}）` : ''}、植えた苗木 ${town.data.saplingsPlanted}本`)
   const summary = townSummary(town)
   if (summary) lines.push(summary)
+  lines.push(`街づくりの次の一歩: ${nextTownStep(town, unfinished)}`)
   // 次に建てたい建物の材料（足りない分）
   if (town.data.center && !unfinished) {
     const wants = designLibrary(ctx).map((spec) => ({ spec, short: shortage(bot, materialsNeeded(specToBlueprint(spec))) }))
