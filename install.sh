@@ -28,7 +28,7 @@ fi
 
 # llama-server はモデルの読み込みに時間がかかるので、ユニットか設定が変わったときだけ再起動する
 llm_before=$(cat /etc/systemd/system/minecraft-ai-llm.service /etc/default/minecraft-ai-town 2>/dev/null | sha256sum)
-install -m 644 systemd/minecraft-ai-bot.service systemd/minecraft-ai-llm.service /etc/systemd/system/
+install -m 644 systemd/minecraft-ai-bot.service systemd/minecraft-ai-bot@.service systemd/minecraft-ai-llm.service /etc/systemd/system/
 llm_after=$(cat /etc/systemd/system/minecraft-ai-llm.service /etc/default/minecraft-ai-town 2>/dev/null | sha256sum)
 systemctl daemon-reload
 
@@ -47,4 +47,14 @@ fi
 
 systemctl enable -q minecraft-ai-bot.service
 systemctl restart minecraft-ai-bot.service
+# 追加の bot（EXTRA_BOTS に名前を空白区切りで）。リストから外したものは止める
+for unit in $(systemctl list-units --all --plain --no-legend 'minecraft-ai-bot@*' | awk '{print $1}'); do
+  name=${unit#minecraft-ai-bot@}; name=${name%.service}
+  [[ " ${EXTRA_BOTS:-} " == *" $name "* ]] || systemctl disable -q --now "$unit"
+done
+for name in ${EXTRA_BOTS:-}; do
+  install -d -o mcai -g mcai /var/lib/minecraft-ai-town/bots
+  systemctl enable -q "minecraft-ai-bot@$name.service"
+  systemctl restart "minecraft-ai-bot@$name.service"
+done
 echo "started. logs: journalctl -u minecraft-ai-bot -f / status: bin/status"

@@ -1,0 +1,21 @@
+[Unit]
+Description=Minecraft AI town bot (extra: %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mcai
+Group=mcai
+WorkingDirectory=/opt/minecraft-ai-town
+EnvironmentFile=/etc/default/minecraft-ai-town
+# サーバーは同じ IP からの接続を4秒あける必要がある（connection-throttle）。名前の番号×6秒ずらして接続する
+ExecStartPre=/bin/sh -c 'n=$(echo %i | tr -dc 0-9 | sed "s/^0*//"); sleep $(( ${n:-1} * 6 ))'
+# 追加の bot は名前ごとに別のデータ（街も別）で、ほかの bot とは関わらずに動く。
+# EnvironmentFile の BOT_NAME / DATA_DIR が Environment= より優先されるので、env で上書きする
+ExecStart=/usr/bin/env BOT_NAME=%i DATA_DIR=/var/lib/minecraft-ai-town/bots/%i /usr/bin/node src/bot/index.js
+Restart=always
+RestartSec=15
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

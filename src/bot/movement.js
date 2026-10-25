@@ -33,7 +33,49 @@ export function updateMovements (bot, town) {
     }
   }
   movements.exclusionAreasBreak.push((block) => (insideStructure(town, block.position) ? 100 : 0))
+  allowDoors(bot, movements)
   bot.pathfinder.setMovements(movements)
+}
+
+// pathfinder はフェンスゲートしか開けないので、木の扉も「開けて通れる」ものとして扱わせる。
+// 閉じた扉: 下半分を開ける対象にし、上半分は通れる扱い（下を開ければ上も開く）。開いた扉: そのまま通れる
+function allowDoors (bot, movements) {
+  const doorIds = new Set(bot.registry.blocksArray.filter((b) => b.name.endsWith('_door') && b.name !== 'iron_door').map((b) => b.id))
+  for (const id of doorIds) movements.openable.add(id)
+  const getBlock = movements.getBlock.bind(movements)
+  movements.getBlock = (p, dx, dy, dz) => {
+    const b = getBlock(p, dx, dy, dz)
+    if (!doorIds.has(b.type)) return b
+    const props = b.getProperties()
+    if (props.open) {
+      b.safe = true
+      b.physical = false
+      b.openable = false
+    } else if (props.half === 'upper') {
+      b.safe = true
+    }
+    return b
+  }
+}
+
+// 移動中に開けた扉は、通り抜けたら閉める（夜に敵が入らないように）
+export function installDoorCloser (bot) {
+  const opened = new Map()
+  const activate = bot.activateBlock.bind(bot)
+  bot.activateBlock = async (block, ...rest) => {
+    if (block?.name?.endsWith('_door')) opened.set(block.position.toString(), block.position)
+    return activate(block, ...rest)
+  }
+  setInterval(() => {
+    if (!bot.entity) return
+    for (const [key, at] of opened) {
+      const d = bot.entity.position.distanceTo(at.offset(0.5, 0, 0.5))
+      if (d < 1.8) continue
+      opened.delete(key)
+      const block = bot.blockAt(at)
+      if (d < 4.5 && block?.name.endsWith('_door') && block.getProperties().open) activate(block).catch(() => {})
+    }
+  }, 500)
 }
 
 // 地形の角に体が引っかかると、経路探索は「stuck → 再計算 → stuck」を延々と繰り返す。

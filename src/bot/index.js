@@ -16,7 +16,7 @@ import { describeSituation, designLibrary, listAbilities, runActivity } from './
 import { normalizeSpec } from './build.js'
 import { loadMemory } from '../thinker/memory.js'
 import { createThinker } from '../thinker/thinker.js'
-import { installRubberbandGuard, installStuckRecovery, installSwimming, updateMovements } from './movement.js'
+import { installDoorCloser, installRubberbandGuard, installStuckRecovery, installSwimming, updateMovements } from './movement.js'
 import { inventorySummary, isNight, pos } from './util.js'
 
 const { pathfinder, goals } = pathfinderPkg
@@ -90,6 +90,7 @@ bot.once('spawn', async () => {
   installStuckRecovery(bot, rec)
   installSwimming(bot)
   installRubberbandGuard(bot, rec)
+  installDoorCloser(bot)
   bot.autoEat.enableAuto()
 
   rec.event('connected', { at: pos(bot.entity.position), version: bot.version })
