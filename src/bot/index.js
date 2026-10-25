@@ -9,14 +9,15 @@ import { loader as autoEat } from 'mineflayer-auto-eat'
 import { createRecorder } from './record.js'
 import { startReflexes } from './reflexes.js'
 import { runActivity } from './activity.js'
+import { installRubberbandGuard, installStuckRecovery, installSwimming, updateMovements } from './movement.js'
 import { inventorySummary, isNight, pos } from './util.js'
 
-const { pathfinder, Movements, goals } = pathfinderPkg
+const { pathfinder, goals } = pathfinderPkg
 
 const config = {
   host: process.env.MC_HOST,
   port: Number(process.env.MC_PORT ?? 25565),
-  version: process.env.MC_VERSION ?? '26.1.2',
+  version: process.env.MC_VERSION ?? '1.21.4',
   username: process.env.BOT_NAME ?? 'ai_builder_01',
   dataDir: process.env.DATA_DIR ?? './data'
 }
@@ -51,10 +52,10 @@ bot.loadPlugin(autoEat)
 bot.once('spawn', async () => {
   // spawn 直後は周りのチャンクが届いていないので、待ってから動き出す
   await bot.waitForChunksToLoad()
-  const movements = new Movements(bot)
-  movements.allowParkour = false
-  movements.canOpenDoors = true
-  bot.pathfinder.setMovements(movements)
+  updateMovements(bot)
+  installStuckRecovery(bot, rec)
+  installSwimming(bot)
+  installRubberbandGuard(bot, rec)
   bot.autoEat.enableAuto()
 
   rec.event('connected', { at: pos(bot.entity.position), version: bot.version })
@@ -89,11 +90,11 @@ bot.on('chat', (username, message) => {
   } else if (/^(止まって|とまって|stop)$/i.test(text)) {
     ctx.paused = true
     bot.collectBlock.cancelTask().catch(() => {})
-    bot.pathfinder.stop()
+    bot.pathfinder.setGoal(null)
     bot.chat('止まった')
   } else if (/^(再開|続けて|resume)$/i.test(text)) {
     ctx.paused = false
-    bot.pathfinder.stop()
+    bot.pathfinder.setGoal(null)
     bot.chat('作業に戻るね')
   } else if (/^(状況|status)$/i.test(text)) {
     bot.chat(`HP ${Math.round(bot.health)} / 満腹度 ${bot.food} / 今: ${ctx.reflex ?? ctx.task ?? '待機'} / 死亡 ${ctx.deaths}回`)

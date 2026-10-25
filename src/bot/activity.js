@@ -3,6 +3,7 @@
 import pathfinderPkg from 'mineflayer-pathfinder'
 import { Vec3 } from 'vec3'
 import { countItem, countMatching, pos, sleep } from './util.js'
+import { updateMovements } from './movement.js'
 
 const { goals } = pathfinderPkg
 
@@ -14,24 +15,101 @@ function logBlockIds (bot) {
 }
 
 const COLLECT_TIMEOUT_MS = 45000
+const STEP_TIMEOUT_MS = 90000
+const EXPLORE_TIMEOUT_MS = 60000
 
-async function collect (bot, ctx, rec, blockIds, label, want) {
-  // 足場なしで届く高さのものだけ狙う（木の上のほうの丸太などは無視）
-  const myY = bot.entity.position.y
-  const found = bot.findBlocks({ matching: blockIds, maxDistance: 48, count: 64 })
-    .filter((p) => p.y <= myY + 3 && p.y >= myY - 8)
-    .slice(0, Math.min(want, 4))
-  if (found.length === 0) return explore(bot, rec, label)
-  const targets = found.map((p) => bot.blockAt(p)).filter(Boolean)
-  const before = label === 'log' ? countMatching(bot, LOG_RE) : countItem(bot, 'cobblestone')
+// 時間内に終わらなければ、動きを止めて先に進む
+async function withTimeout (bot, promise, ms) {
   let timer
   const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => bot.collectBlock.cancelTask().catch(() => {}).then(resolve), COLLECT_TIMEOUT_MS)
+    timer = setTimeout(async () => {
+      if (bot.collectBlock) await bot.collectBlock.cancelTask().catch(() => {})
+      // stop() は移動していないとフラグが残って次の移動を止めてしまうので、setGoal(null) で即座に解除する
+      bot.pathfinder.setGoal(null)
+      resolve('timeout')
+    }, ms)
   })
-  await Promise.race([bot.collectBlock.collect(targets, { ignoreNoPath: true }), timeout])
-  clearTimeout(timer)
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// 丸太が地面から何ブロック上にあるか（下に続く丸太をたどって数える）
+function heightAboveGround (bot, p) {
+  let h = 0
+  let below = bot.blockAt(p.offset(0, -1, 0))
+  while (below && LOG_RE.test(below.name) && h < 30) {
+    h++
+    below = bot.blockAt(p.offset(0, -1 - h, 0))
+  }
+  return below?.boundingBox === 'block' ? h : Infinity
+}
+
+// 足場なしで手が届くものだけ狙う（木の上のほうの丸太、深すぎる石は無視）
+function reachableFilter (bot, label) {
+  const y = bot.entity.position.y
+  if (label === 'log') return (p) => heightAboveGround(bot, p) <= 3
+  return (p) => p.y <= y + 3 && p.y >= y - 8
+}
+
+// たどり着けなかった場所（8x8 の区画単位）。2回失敗した区画は10分間狙わない
+const unreachable = new Map()
+const UNREACHABLE_FORGET_MS = 10 * 60 * 1000
+const cellOf = (p) => `${Math.floor(p.x / 8)},${Math.floor(p.z / 8)}`
+
+function markUnreachable (p) {
+  const cell = cellOf(p)
+  const entry = unreachable.get(cell) ?? { fails: 0 }
+  unreachable.set(cell, { fails: entry.fails + 1, at: Date.now() })
+}
+
+function isGivenUp (p) {
+  const entry = unreachable.get(cellOf(p))
+  if (!entry) return false
+  if (Date.now() - entry.at > UNREACHABLE_FORGET_MS) {
+    unreachable.delete(cellOf(p))
+    return false
+  }
+  return entry.fails >= 2
+}
+
+// 近い順。ただし高低差は登り降りが大変なので3倍に数える
+function findReachable (bot, blockIds, label, maxDistance) {
+  const me = bot.entity.position
+  const cost = (p) => p.distanceTo(me) + 3 * Math.abs(p.y - me.y)
+  return bot.findBlocks({ matching: blockIds, maxDistance, count: 256 })
+    .filter(reachableFilter(bot, label))
+    .filter((p) => !isGivenUp(p))
+    .sort((a, b) => cost(a) - cost(b))
+}
+
+async function collect (bot, ctx, rec, blockIds, label, want) {
+  let found = findReachable(bot, blockIds, label, 96)
+  if (found.length === 0) return explore(bot, rec, label)
+
+  // 遠ければ、まず近くまで歩く
+  const nearest = found[0]
+  const distance = nearest.distanceTo(bot.entity.position)
+  if (distance > 12) {
+    rec.event('approach', { looking: label, to: pos(nearest), distance: Math.round(distance) })
+    const result = await withTimeout(bot, bot.pathfinder.goto(new goals.GoalNear(nearest.x, nearest.y, nearest.z, 3)).catch((err) => err), EXPLORE_TIMEOUT_MS)
+    if (result) {
+      markUnreachable(nearest)
+      rec.event('approach_failed', { reason: result === 'timeout' ? 'timeout' : result.message, target: pos(nearest), at: pos(bot.entity.position) })
+      return false
+    }
+    found = findReachable(bot, blockIds, label, 16)
+    if (found.length === 0) return false
+  }
+
+  const targets = found.slice(0, Math.min(want, 4)).map((p) => bot.blockAt(p)).filter(Boolean)
+  const before = label === 'log' ? countMatching(bot, LOG_RE) : countItem(bot, 'cobblestone')
+  await withTimeout(bot, bot.collectBlock.collect(targets, { ignoreNoPath: true }), COLLECT_TIMEOUT_MS)
   const after = label === 'log' ? countMatching(bot, LOG_RE) : countItem(bot, 'cobblestone')
   if (after > before) rec.event('mine', { block: label, gained: after - before, at: pos(bot.entity.position) })
+  return after > before
 }
 
 async function explore (bot, rec, looking) {
@@ -39,7 +117,8 @@ async function explore (bot, rec, looking) {
   const p = bot.entity.position
   const target = new Vec3(p.x + Math.cos(angle) * 40, p.y, p.z + Math.sin(angle) * 40)
   rec.event('explore', { looking, to: pos(target) })
-  await bot.pathfinder.goto(new goals.GoalNearXZ(target.x, target.z, 4)).catch(() => {})
+  const result = await withTimeout(bot, bot.pathfinder.goto(new goals.GoalNearXZ(target.x, target.z, 4)).catch((err) => err), EXPLORE_TIMEOUT_MS)
+  if (result) rec.event('explore_stopped', { reason: result === 'timeout' ? 'timeout' : result.message, at: pos(bot.entity.position) })
 }
 
 async function ensureCraftingTable (bot, rec) {
@@ -76,10 +155,17 @@ async function craft (bot, rec, name, count) {
     recipe = bot.recipesFor(item.id, null, 1, table)[0]
   }
   if (!recipe) return false
-  const times = Math.ceil(count / recipe.result.count)
-  await bot.craft(recipe, times, table)
-  rec.event('craft', { item: name, count: times * recipe.result.count })
-  return true
+  // 材料が足りなければ回数を減らして作る
+  for (let times = Math.ceil(count / recipe.result.count); times >= 1; times--) {
+    try {
+      await bot.craft(recipe, times, table)
+      rec.event('craft', { item: name, count: times * recipe.result.count })
+      return true
+    } catch (err) {
+      if (!/missing ingredient/i.test(err.message) || times === 1) throw err
+    }
+  }
+  return false
 }
 
 async function craftPlanks (bot, rec, want) {
@@ -117,11 +203,13 @@ export async function runActivity (bot, ctx, rec) {
   const list = steps(bot, ctx, rec)
   let failures = 0
   while (bot.entity) {
-    if (ctx.reflex || ctx.paused) {
+    // 夜に避難できなかったときは、戦闘の反射を生かしたまま作業を続ける
+    if ((ctx.reflex && ctx.reflex !== 'night_no_shelter') || ctx.paused) {
       ctx.task = ctx.paused ? 'paused' : null
       await sleep(1000)
       continue
     }
+    updateMovements(bot)
     const step = list.find((s) => s.todo())
     if (!step) {
       ctx.task = 'idle'
@@ -130,8 +218,9 @@ export async function runActivity (bot, ctx, rec) {
     }
     ctx.task = step.name
     try {
-      const ok = await step.run()
-      failures = ok === false ? failures + 1 : 0
+      const ok = await withTimeout(bot, step.run(), STEP_TIMEOUT_MS)
+      if (ok === 'timeout') rec.event('task_timeout', { task: step.name, at: pos(bot.entity.position) })
+      failures = ok === false || ok === 'timeout' ? failures + 1 : 0
     } catch (err) {
       failures++
       if (!ctx.reflex) rec.event('task_error', { task: step.name, error: err.message })

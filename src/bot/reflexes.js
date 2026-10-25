@@ -37,7 +37,7 @@ export function startReflexes (bot, ctx, rec) {
 
   async function interruptActivity () {
     if (bot.collectBlock) await bot.collectBlock.cancelTask().catch(() => {})
-    bot.pathfinder.stop()
+    bot.pathfinder.setGoal(null)
   }
 
   function nearestThreat () {
@@ -54,7 +54,7 @@ export function startReflexes (bot, ctx, rec) {
     if (!threat) {
       if (ctx.reflex === 'fight' || ctx.reflex === 'flee') {
         bot.pvp.stop()
-        bot.pathfinder.stop()
+        bot.pathfinder.setGoal(null)
         ctx.reflex = shelterFrom ? 'shelter' : null
       }
       return
@@ -103,9 +103,17 @@ export function startReflexes (bot, ctx, rec) {
         rec.event('shelter_failed', { reason: `unsafe below (${below?.name}/${under?.name})`, at: pos(start) })
         return false
       }
-      // 素手で石を掘るような、時間のかかる穴掘りはしない
-      if (bot.digTime(below) > 2500) {
-        rec.event('shelter_failed', { reason: `too slow to dig ${below.name}`, at: pos(start) })
+      // 縦穴の横に水や溶岩があると、掘ったとたんに流れ込んでくる
+      const side = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+        .map(([dx, dz]) => bot.blockAt(start.offset(dx, -dy, dz))?.name)
+        .find((name) => name === 'water' || name === 'lava')
+      if (side) {
+        rec.event('shelter_failed', { reason: `${side} next to the shaft`, at: pos(start) })
+        return false
+      }
+      // 素手で石を掘るような、時間のかかる穴掘りはしない（土・砂・砂利は素手でも1秒前後）
+      if (bot.digTime(below) > 5000) {
+        rec.event('shelter_failed', { reason: `too slow to dig ${below.name} (${Math.round(bot.digTime(below))}ms, onGround=${bot.entity.onGround})`, at: pos(start) })
         return false
       }
       await bot.dig(below)
@@ -144,7 +152,14 @@ export function startReflexes (bot, ctx, rec) {
 
   async function nightCheck () {
     if (ctx.reflex === 'fight' || ctx.reflex === 'flee' || ctx.reflex === 'leaving_shelter') return
-    if (isNight(bot) && !shelterFrom && ctx.reflex !== 'sheltering') {
+    // 避難中に水が入ってきたら、夜でもすぐ出る
+    if (shelterFrom && (bot.entity.isInWater || bot.oxygenLevel < 18)) {
+      rec.event('shelter_flooded', { oxygen: bot.oxygenLevel, at: pos(bot.entity.position) })
+      await leaveShelter()
+      ctx.reflex = 'night_no_shelter'
+      return
+    }
+    if (isNight(bot) && !shelterFrom && ctx.reflex !== 'sheltering' && ctx.reflex !== 'night_no_shelter') {
       ctx.reflex = 'sheltering'
       await interruptActivity()
       const ok = await shelter().catch((err) => {

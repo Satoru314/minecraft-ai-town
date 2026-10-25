@@ -30,9 +30,9 @@ AI の仕事を速さで3段に分ける。
 
 ## 接続先として想定するサーバー
 
-- Minecraft Java Edition **26.1.x**（Mineflayer の対応版に合わせる）
+- Minecraft Java Edition **1.21.4**（Mineflayer がまともに動く版。26.1.x では移動がサーバーに拒否され続けた）
 - `online-mode=false`（bot はアカウントなしで接続する）、bot の名前はホワイトリストに登録済み
-- 難易度イージー、`keep_inventory` オン
+- 難易度イージー、`keepInventory` オン
 - 接続先は設定ファイル（`host` / `port`）で渡す。特定のサーバー構成には依存しない
 
 `online-mode=false` のサーバーは名前を名乗るだけで誰でも入れるので、インターネットに公開しないこと。

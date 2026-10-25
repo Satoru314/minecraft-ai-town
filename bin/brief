@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""bot の状態を1行で表示する（定期的な見張り用）。
+
+  bin/brief [分]   直近 N 分（既定 3）の出来事の件数とエラーも出す
+"""
+import collections
+import datetime
+import json
+import os
+import sys
+
+data = os.environ.get("DATA_DIR", "/var/lib/minecraft-ai-town")
+minutes = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+PROBLEMS = {"task_error", "task_timeout", "approach_failed", "explore_stopped", "shelter_failed",
+            "death", "reflex_error", "activity_crashed", "kicked"}
+KEEP = ("_log", "_stem", "_planks", "pickaxe", "sword", "_axe")
+KEEP_EXACT = {"cobblestone", "stick", "crafting_table", "dirt"}
+
+s = json.load(open(f"{data}/state.json"))
+since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)).isoformat()[:19]
+recent = []
+with open(f"{data}/events.jsonl") as f:
+    for line in f:
+        e = json.loads(line)
+        if e["t"][:19] >= since:
+            recent.append(e)
+
+counts = dict(collections.Counter(e["type"] for e in recent))
+inv = {k: v for k, v in s["inventory"].items() if k.endswith(KEEP) or k in KEEP_EXACT}
+problems = [(e["type"], e.get("reason") or e.get("error") or e.get("cause") or e.get("task"))
+            for e in recent if e["type"] in PROBLEMS][-4:]
+print(f"[{s['updatedAt'][11:19]}] pos={s['position']} hp={round(s['health'] or 0, 1)} food={s['food']} "
+      f"{'夜' if s['night'] else '昼'} now={s['reflex'] or s['task']} deaths={s['deaths']} "
+      f"alive_since={s['aliveSince'][11:19]} inv={inv} last{minutes}min={counts} problems={problems}")
