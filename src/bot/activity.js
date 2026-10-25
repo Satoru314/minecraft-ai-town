@@ -27,8 +27,9 @@ const EXPLORE_TIMEOUT_MS = 60000
 async function withTimeout (bot, promise, ms) {
   let timer
   const timeout = new Promise((resolve) => {
-    timer = setTimeout(async () => {
-      if (bot.collectBlock) await bot.collectBlock.cancelTask().catch(() => {})
+    timer = setTimeout(() => {
+      // cancelTask() は返ってこないことがあるので待たない（待つと時間切れの処理ごと止まる）
+      if (bot.collectBlock) bot.collectBlock.cancelTask().catch(() => {})
       // stop() は移動していないとフラグが残って次の移動を止めてしまうので、setGoal(null) で即座に解除する
       bot.pathfinder.setGoal(null)
       resolve('timeout')
