@@ -7,7 +7,7 @@ import { insideStructure, updateMovements } from './movement.js'
 import { fellTree, isTreeBase } from './trees.js'
 import { craftOnce } from './crafting.js'
 import { BUILTIN_SPECS, SMALL_HOUSE, blueprintFor, build, findBuildSite, houseBlueprint, materialCount, materialsNeeded, normalizeSpec, pickMaterial, prepareSite, specToBlueprint } from './build.js'
-import { PLOT, earthwork, ensureCenter, nextPlotToLevel, nextRoad, readyPlots, roadBounds, townSummary } from './townplan.js'
+import { PLOT, earthwork, ensureCenter, nextPlotToLevel, nextRoad, readyPlots, roadBounds, roadwork, townSummary } from './townplan.js'
 import { foodCount, goHome, houses as finishedHouses, hunt, makeBed, makeDoor, plantSaplings, sleepInBed, stayHome, storeItems } from './skills.js'
 
 const { goals } = pathfinderPkg
@@ -281,7 +281,7 @@ async function buildOnPlot (bot, ctx, rec, town, spec) {
   const plot = readyPlots(town)[0]
   if (!plot) return false
   const bp = specToBlueprint(spec)
-  const origin = { x: plot.x0 + Math.floor((PLOT - bp.size.x) / 2), y: town.data.level + 1, z: plot.z0 + Math.floor((PLOT - bp.size.z) / 2) }
+  const origin = { x: plot.x0 + Math.floor((PLOT - bp.size.x) / 2), y: plot.level + 1, z: plot.z0 + Math.floor((PLOT - bp.size.z) / 2) }
   const structure = { type: spec.name, spec, origin, size: bp.size, plot: plot.id, done: false, startedAt: new Date().toISOString() }
   town.data.structures.push(structure)
   town.data.plots[plot.id] = { state: 'building', building: spec.name }
@@ -302,11 +302,11 @@ async function levelPlot (bot, ctx, rec, town) {
   const plot = nextPlotToLevel(bot, town)
   if (!plot) { town.save(); return false }
   // 進まなかった回数（stuck）は残す
-  town.data.plots[plot.id] = { ...(town.data.plots[plot.id] ?? {}), state: 'leveling' }
+  town.data.plots[plot.id] = { ...(town.data.plots[plot.id] ?? {}), level: plot.level, state: 'leveling' }
   town.save()
   const work = earthwork(bot, town, plot)
   if (!work) {
-    town.data.plots[plot.id] = { state: 'skipped', reason: 'unsuitable' }
+    town.data.plots[plot.id] = { level: plot.level, state: 'skipped', reason: 'unsuitable' }
     town.save()
     return false
   }
@@ -331,7 +331,7 @@ async function levelPlot (bot, ctx, rec, town) {
   const sample = left ? [...left.cut.slice(0, 3).map((p) => `削る ${bot.blockAt(p)?.name}@${p}`), ...left.fill.slice(0, 3).map((p) => `埋める @${p}`)] : []
   rec.event('level', { plot: plot.id, before, remaining, sample })
   if (remaining === 0) {
-    town.data.plots[plot.id] = { state: 'leveled' }
+    town.data.plots[plot.id] = { level: plot.level, state: 'leveled' }
     rec.event('plot_leveled', { plot: plot.id })
     town.save()
     return true
@@ -341,15 +341,15 @@ async function levelPlot (bot, ctx, rec, town) {
     const stuck = (town.data.plots[plot.id]?.stuck ?? 0) + 1
     if (stuck >= 3) {
       const good = remaining !== null && remaining <= 20
-      town.data.plots[plot.id] = good ? { state: 'leveled', leftover: remaining } : { state: 'skipped', reason: 'stuck' }
+      town.data.plots[plot.id] = good ? { level: plot.level, state: 'leveled', leftover: remaining } : { state: 'skipped', reason: 'stuck' }
       rec.event(good ? 'plot_leveled' : 'plot_skipped', { plot: plot.id, leftover: remaining })
     } else {
-      town.data.plots[plot.id] = { state: 'leveling', stuck }
+      town.data.plots[plot.id] = { level: plot.level, state: 'leveling', stuck }
     }
     town.save()
     return false
   }
-  town.data.plots[plot.id] = { state: 'leveling' }
+  town.data.plots[plot.id] = { level: plot.level, state: 'leveling' }
   town.save()
   return true
 }
@@ -363,36 +363,52 @@ async function buildRoad (bot, ctx, rec, town) {
   const key = nextRoad(town)
   if (!key) return false
   const b = roadBounds(town, key)
-  const work = earthwork(bot, town, b)
+  let work = roadwork(bot, town, b)
+  if (work?.unseen) {
+    // 遠くて地形が見えていないので、まず近くまで行く
+    await bot.pathfinder.goto(new goals.GoalNearXZ((b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2, 4)).catch(() => {})
+    work = roadwork(bot, town, b)
+    if (!work || work.unseen) {
+      if (!work) { town.data.roads[key] = { state: 'skipped' }; town.save() }
+      return false
+    }
+  }
   if (!work) {
     town.data.roads[key] = { state: 'skipped' }
     town.save()
     return false
   }
   const stop = stopper(ctx)
-  if (work.cut.length || work.fill.length) await doEarthwork(bot, rec, work, stop)
+  // 道の上の木は根元から丸ごと切る
+  for (const p of work.cut) {
+    if (stop()) return true
+    if (!LOG_RE.test(bot.blockAt(p)?.name ?? '')) continue
+    let base = p
+    while (LOG_RE.test(bot.blockAt(base.offset(0, -1, 0))?.name ?? '')) base = base.offset(0, -1, 0)
+    await fellTree(bot, rec, base, { stop, isProtected: (q) => insideStructure(town, q) })
+  }
+  work = roadwork(bot, town, b)
+  if (!work || work.unseen) return false
+  if (work.cut.length) await doEarthwork(bot, rec, work, stop)
   if (stop()) return true
   if (!(await ensureShovel(bot, rec))) return false
 
   // 草や土をシャベルで「土の道」にする
   let paved = 0
-  const level = town.data.level
-  for (let x = b.x0; x <= b.x1; x++) {
-    for (let z = b.z0; z <= b.z1; z++) {
-      if (stop()) return paved > 0
-      const top = bot.blockAt(new Vec3(x, level, z))
-      const above = bot.blockAt(new Vec3(x, level + 1, z))
-      if (!top || !PAVABLE.has(top.name) || above?.name !== 'air') continue
-      try {
-        await bot.pathfinder.goto(new goals.GoalLookAtBlock(top.position, bot.world, { reach: 4 }))
-        await bot.equip(bot.inventory.items().find((i) => i.name.endsWith('_shovel')), 'hand')
-        await bot.activateBlock(top)
-        paved++
-      } catch {}
-    }
+  for (const p of work.surface) {
+    if (stop()) return paved > 0
+    const top = bot.blockAt(p)
+    const above = bot.blockAt(p.offset(0, 1, 0))
+    if (!top || !PAVABLE.has(top.name) || above?.name !== 'air') continue
+    try {
+      await bot.pathfinder.goto(new goals.GoalLookAtBlock(top.position, bot.world, { reach: 4 }))
+      await bot.equip(bot.inventory.items().find((i) => i.name.endsWith('_shovel')), 'hand')
+      await bot.activateBlock(top)
+      paved++
+    } catch {}
   }
-  const left = earthwork(bot, town, b)
-  if (left && left.cut.length + left.fill.length === 0) {
+  const left = roadwork(bot, town, b)
+  if (left && !left.unseen && left.cut.length === 0) {
     town.data.roads[key] = { state: 'done' }
     rec.event('road', { key, paved })
   }
@@ -568,11 +584,13 @@ export function listAbilities (bot, ctx, rec, town) {
 }
 
 // LLM を使わないとき（または応答がないとき）の判断。優先順位で選ぶ。
-// 直近2回続けて失敗した行動は一度飛ばす。
+// 最近その行動を2回やって2回とも失敗していたら、一度飛ばす。
 function ruleChoice (options, bot, ctx, town) {
   const keys = options.map((o) => o.key)
-  const recent = ctx.history.slice(-2)
-  const failing = (k) => recent.length === 2 && recent.every((h) => h.key === k && !h.ok)
+  const failing = (k) => {
+    const tries = ctx.history.slice(-8).filter((h) => h.key === k).slice(-2)
+    return tries.length === 2 && tries.every((h) => !h.ok)
+  }
   const has = (k) => keys.includes(k) && !failing(k)
   const pick = (...ks) => ks.find(has)
 
@@ -592,10 +610,12 @@ function ruleChoice (options, bot, ctx, town) {
   if (!hasReady && has('level_plot') && lastTown < 3) return 'level_plot'
   if (has('build_road') && lastTown === 0 && Math.random() < 0.5) return 'build_road'
 
-  // 材料集め: 次に建てたい建物に足りない方を集める
+  // 材料集め: 建てかけの建物、なければ次に建てたい建物に足りない方を集める
   if (has('plant_saplings') && Math.random() < 0.1) return 'plant_saplings'
-  const want = designLibrary(ctx).map((spec) => shortage(bot, materialsNeeded(specToBlueprint(spec))))
-    .find((s) => Object.keys(s).length)
+  const unfinished = town.data.structures.find((s) => !s.done)
+  const want = unfinished
+    ? shortage(bot, materialsNeeded(blueprintFor(unfinished)))
+    : designLibrary(ctx).map((spec) => shortage(bot, materialsNeeded(specToBlueprint(spec)))).find((s) => Object.keys(s).length)
   if (want?.cobblestone && has('mine_stone')) return 'mine_stone'
   if ((want?.log || want?.planks) && has('collect_logs')) return 'collect_logs'
   const gather = pick(Math.random() < 0.5 ? 'mine_stone' : 'collect_logs', 'mine_stone', 'collect_logs', 'hunt', 'explore')
@@ -608,6 +628,13 @@ export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
   ctx.history = ctx.history ?? []
   bot.__town = town
   let failures = 0
+  // 区画を街全体の高さでならしていたころに「飛ばした」区画と道を、もう一度候補に戻す
+  if (town.data.center && town.data.planVersion !== 2) {
+    for (const [id, p] of Object.entries(town.data.plots)) if (p.state === 'skipped' || p.state === 'leveling') delete town.data.plots[id]
+    for (const [k, r] of Object.entries(town.data.roads)) if (r.state === 'skipped') delete town.data.roads[k]
+    town.data.planVersion = 2
+    town.save()
+  }
 
   while (bot.entity) {
     if (ctx.reflex || ctx.paused) {
@@ -617,7 +644,10 @@ export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
     }
     updateMovements(bot, town)
 
-    let step = bootstrap.find((s) => s.todo())
+    // 最初の道具づくりは、2回続けて失敗した手順をいったん飛ばして、ほかの行動（材料集めなど）に回す
+    const recent = ctx.history.slice(-2)
+    const blocked = (name) => recent.length === 2 && recent.every((h) => h.key === name && !h.ok)
+    let step = bootstrap.find((s) => s.todo() && !blocked(s.name))
     let timeout = STEP_TIMEOUT_MS
     if (!step) {
       // 石の道具がそろったら、判断係に次の行動を選ばせる
