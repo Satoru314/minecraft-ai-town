@@ -597,7 +597,8 @@ function ruleChoice (options, bot, ctx, town) {
   // 夜: 寝る > 家にこもる > 穴にこもる
   const night = pick('sleep', 'stay_home', 'dig_in')
   if (night) return night
-  if (foodCount(bot) < 3 && has('hunt')) return 'hunt'
+  // 狩りは、お腹が減ってきて手持ちの食べ物も少ないときだけ（生肉はすぐ食べてしまうので、手持ちの数だけで決めない）
+  if (bot.food < 14 && foodCount(bot) < 3 && has('hunt')) return 'hunt'
   const care = pick('repair', 'finish_building', 'build_house', 'make_door', 'make_bed', 'store_items')
   if (care) return care
   // 建てられる建物があれば建てる（同じものばかりにならないよう、ランダム）
