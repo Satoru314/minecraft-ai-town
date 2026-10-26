@@ -101,6 +101,7 @@ export function nextPlotToLevel (bot, town) {
 }
 
 export function readyPlots (town) {
+  if (!town.data.center) return []
   return plotsByDistance(town).filter((p) => p.state === 'leveled')
 }
 

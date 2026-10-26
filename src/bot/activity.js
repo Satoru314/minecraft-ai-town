@@ -654,6 +654,7 @@ export async function runActivity (bot, ctx, rec, { decider, town, goal }) {
       if (!ctx.reflex) rec.event('task_error', { task: step.name, error: err.message })
     }
     rec.event('step', { key: step.name, ok })
+    ctx.lastStepAt = Date.now()
     ctx.history.push({ key: step.name, ok })
     if (ctx.history.length > 20) ctx.history.shift()
     failures = ok ? 0 : failures + 1

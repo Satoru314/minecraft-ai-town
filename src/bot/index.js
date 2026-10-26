@@ -95,7 +95,18 @@ bot.once('spawn', async () => {
 
   rec.event('connected', { at: pos(bot.entity.position), version: bot.version })
   startReflexes(bot, ctx, rec)
-  runActivity(bot, ctx, rec, { decider, town, goal }).catch((err) => rec.event('activity_crashed', { error: err.message }))
+  // 行動ループが落ちたら、プロセスごと終了して systemd に再起動させる
+  runActivity(bot, ctx, rec, { decider, town, goal }).catch((err) => {
+    rec.event('activity_crashed', { error: err.message, stack: err.stack?.split('\n').slice(0, 4).join(' | ') })
+    process.exit(1)
+  })
+  // 20分なにも終わらなければ、どこかで固まっているので再起動する（夜にこもるのは長くても10分）
+  ctx.lastStepAt = Date.now()
+  setInterval(() => {
+    if (ctx.paused || Date.now() - ctx.lastStepAt < 20 * 60 * 1000) return
+    rec.event('watchdog_restart', { reflex: ctx.reflex, task: ctx.task, at: pos(bot.entity.position) })
+    process.exit(1)
+  }, 60000)
   if (!llmOff) thinker = createThinker({
     bot,
     ctx,

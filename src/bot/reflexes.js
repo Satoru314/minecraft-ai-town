@@ -43,10 +43,16 @@ export function startReflexes (bot, ctx, rec) {
     bot.pathfinder.setGoal(null)
   }
 
+  // 30秒戦っても倒せない相手（壁の向こう・穴の下など）は、しばらく相手にしない
+  const FIGHT_GIVE_UP_MS = 30000
+  const ignored = new Map()
+  let fightSince = 0
   function nearestThreat () {
     const me = bot.entity.position
+    const now = Date.now()
     return bot.nearestEntity((e) =>
       isHostile(e) &&
+      !(ignored.get(e.id) > now) &&
       e.position.distanceTo(me) < FIGHT_RANGE &&
       Math.abs(e.position.y - me.y) < 4)
   }
@@ -78,10 +84,20 @@ export function startReflexes (bot, ctx, rec) {
       return
     }
 
+    if (ctx.reflex === 'fight' && fightTarget === threat && Date.now() - fightSince > FIGHT_GIVE_UP_MS) {
+      ignored.set(threat.id, Date.now() + 2 * 60 * 1000)
+      rec.event('fight_given_up', { target: threat.name, at: pos(bot.entity.position) })
+      bot.pvp.stop()
+      bot.pathfinder.setGoal(null)
+      fightTarget = null
+      ctx.reflex = shelterFrom ? 'shelter' : null
+      return
+    }
     if (ctx.reflex !== 'fight' || fightTarget !== threat) {
       const wasActive = !ctx.reflex
       ctx.reflex = 'fight'
       fightTarget = threat
+      fightSince = Date.now()
       if (wasActive) await interruptActivity()
       await equipBestWeapon(bot)
       rec.event('fight', { target: threat.name, health: bot.health, at: pos(bot.entity.position) })
