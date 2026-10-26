@@ -91,6 +91,8 @@ bot.once('spawn', async () => {
   installSwimming(bot)
   installRubberbandGuard(bot, rec)
   installDoorCloser(bot)
+  // 満腹度ゲージが8個（16）以上のときは食べない。HP が減っても、お腹が空いていなければ食べない
+  bot.autoEat.setOpts({ minHunger: 16, minHealth: 0 })
   bot.autoEat.enableAuto()
 
   rec.event('connected', { at: pos(bot.entity.position), version: bot.version })
